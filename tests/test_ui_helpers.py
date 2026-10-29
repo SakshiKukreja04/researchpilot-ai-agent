@@ -1,6 +1,7 @@
 """Unit tests for Streamlit UI helper functions."""
 
 from app.main import (
+    clear_research_session,
     build_source_comparison_data,
     build_trace_table_data,
     calculate_trace_metrics,
@@ -30,6 +31,20 @@ def test_validate_user_question():
     is_valid, err = validate_user_question("What are vector database memory benchmarks?")
     assert is_valid is True
     assert err == ""
+
+
+def test_clear_research_session_removes_query_and_result():
+    state = {
+        "question_input": "old question",
+        "submitted_question": "old question",
+        "research_context": object(),
+    }
+
+    clear_research_session(state)
+
+    assert state["question_input"] == ""
+    assert "submitted_question" not in state
+    assert "research_context" not in state
 
 
 def test_format_source_display_date():
@@ -131,4 +146,3 @@ def test_calculate_trace_metrics():
     assert metrics["total_events"] == 3
     assert metrics["tool_calls_count"] == 2
     assert metrics["failures_count"] == 1
-

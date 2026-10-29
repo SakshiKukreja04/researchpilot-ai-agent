@@ -20,7 +20,7 @@ def _answer() -> ResearchAnswer:
                 source_ids=["src_abcdef12"],
             )
         ],
-        sources_used=["src_1"],
+        sources_used=["src_abcdef12"],
         confidence=ConfidenceLevel.HIGH,
         assumptions=[],
         limitations=[],

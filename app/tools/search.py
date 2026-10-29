@@ -222,31 +222,76 @@ def web_search(
             raise SearchProviderError("The 'ddgs' package is not installed.")
         ddgs_client = DDGS(timeout=timeout)
 
-    def _provider_search(search_query: str) -> Any:
-        return ddgs_client.text(
-            search_query,
-            max_results=clamped_max_results * 2,
-        )
+    def _provider_search(search_query: str, provider: Any = ddgs_client) -> Any:
+        kwargs: dict[str, Any] = {
+            "max_results": clamped_max_results * 2,
+        }
+        if provider is not ddgs_client:
+            kwargs["backend"] = settings.search_fallback_backend
+        return provider.text(search_query, **kwargs)
 
+    def _fallback_search(search_query: str) -> Any:
+        if client is not None or not settings.search_fallback_backend:
+            return []
+        if DDGS is None:
+            return []
+        fallback_client = DDGS(timeout=timeout)
+        try:
+            logger.info(
+                "Trying fallback search backend '%s' for query: %s",
+                settings.search_fallback_backend,
+                search_query,
+            )
+            return _provider_search(search_query, fallback_client)
+        finally:
+            close = getattr(fallback_client, "close", None)
+            if callable(close):
+                close()
+
+    raw_results: Any = []
+    primary_error: Optional[SearchError] = None
     try:
         # Request slightly more raw results to account for deduplication and filtering.
         raw_results = _provider_search(cleaned_query)
     except TimeoutException as err:
         logger.warning("Search timed out for query: %s", cleaned_query)
-        raise SearchTimeoutError(f"Search provider timed out after {timeout}s.") from err
+        primary_error = SearchTimeoutError(f"Search provider timed out after {timeout}s.")
     except RatelimitException as err:
         logger.warning("Search provider rate-limited for query: %s", cleaned_query)
-        raise SearchRateLimitError("Search provider rate limit exceeded. Please back off.") from err
+        primary_error = SearchRateLimitError("Search provider rate limit exceeded. Please back off.")
     except DDGSException as err:
         err_msg = str(err).lower()
         if "no results found" in err_msg:
             logger.info("Search returned 0 results for query: %s", cleaned_query)
-            return []
-        logger.error("DDGSException during search: %s", err)
-        raise SearchProviderError(f"Search provider error: {err}") from err
+            raw_results = []
+        else:
+            logger.error("DDGSException during search: %s", err)
+            primary_error = SearchProviderError(f"Search provider error: {err}")
     except Exception as err:
         logger.error("Unexpected error during search: %s", type(err).__name__)
-        raise SearchProviderError(f"Unexpected search error: {type(err).__name__}") from err
+        primary_error = SearchProviderError(
+            f"Unexpected search error: {type(err).__name__}"
+        )
+
+    if primary_error is not None:
+        try:
+            raw_results = _fallback_search(cleaned_query)
+        except Exception as fallback_err:
+            logger.warning(
+                "Fallback search backend failed: %s", type(fallback_err).__name__
+            )
+            raise primary_error from fallback_err
+        if not raw_results:
+            raise primary_error
+
+    if not raw_results:
+        try:
+            raw_results = _fallback_search(cleaned_query)
+        except Exception as fallback_err:
+            logger.info(
+                "Fallback search for empty result failed: %s",
+                type(fallback_err).__name__,
+            )
 
     if not raw_results:
         fallback_query = _simplify_search_query(cleaned_query)

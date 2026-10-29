@@ -29,7 +29,7 @@ def load_cases() -> list[dict[str, Any]]:
 
 def run_deterministic_case(case: dict[str, Any]):
     """Run the full pipeline with deterministic stand-ins for external services."""
-    if case["id"] == "E4":
+    if not case["question"].strip():
         return run_full_pipeline(case["question"])
 
     plan = ResearchPlan(

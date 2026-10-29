@@ -52,6 +52,8 @@ class Settings:
     cache_enabled: bool = True
     cache_ttl_seconds: float = 300.0
     cache_max_entries: int = 128
+    search_fallback_backend: Optional[str] = "bing"
+    streamlit_evaluation_log: str = "evaluation/results/streamlit_runs.json"
 
     def require_groq_api_key(self) -> str:
         """Return the Groq API key or raise an actionable, safe ConfigurationError."""
@@ -129,6 +131,13 @@ def load_settings_from_env() -> Settings:
         cache_enabled=_parse_bool("CACHE_ENABLED", True),
         cache_ttl_seconds=_parse_float("CACHE_TTL_SECONDS", 300.0),
         cache_max_entries=_parse_int("CACHE_MAX_ENTRIES", 128),
+        search_fallback_backend=(
+            os.getenv("SEARCH_FALLBACK_BACKEND", "bing").strip() or None
+        ),
+        streamlit_evaluation_log=os.getenv(
+            "STREAMLIT_EVALUATION_LOG",
+            "evaluation/results/streamlit_runs.json",
+        ).strip(),
     )
 
 

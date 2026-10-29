@@ -1,30 +1,60 @@
 [
   {
     "id": "E1",
+    "question": "Compare the top 3 open-source vector databases for a startup building RAG products.",
+    "mode": "live",
+    "expected": "The answer should compare the top three databases across retrieval features, scaling, operational complexity, ecosystem, and licensing with source-backed findings."
+  },
+  {
+    "id": "E2",
+    "question": "Find 5 Indian B2B SaaS startups in HR tech and summarize their positioning.",
+    "mode": "live",
+    "expected": "The answer should identify five Indian B2B HR technology SaaS startups, summarize each company's positioning, and cite reliable sources without inventing companies or details."
+  },
+  {
+    "id": "E3",
+    "question": "Research the pros and cons of using a multi-agent architecture for customer support automation.",
+    "mode": "live",
+    "expected": "The answer should distinguish coordination and specialization benefits from latency, cost, reliability, debugging, and operational risks."
+  },
+  {
+    "id": "E4",
+    "question": "Compare different approaches to adding memory in an AI support agent.",
+    "mode": "live",
+    "expected": "The answer should compare conversation-buffer memory, summaries, retrieval memory, and durable memory, including privacy, retention, cost, and accuracy tradeoffs."
+  },
+  {
+    "id": "E5",
+    "question": "What are the main security risks when an application fetches content from arbitrary web URLs?",
+    "mode": "live",
+    "expected": "The answer should discuss SSRF, unsafe redirects, malicious or untrusted content, denial-of-service risks, and relevant mitigations with citations."
+  },
+  {
+    "id": "E6",
     "question": "Compare PostgreSQL and SQLite for a small offline-first research application.",
     "mode": "live",
     "expected": "The answer should compare common criteria, cite retrieved sources, and disclose evidence gaps."
   },
   {
-    "id": "E2",
+    "id": "E7",
     "question": "Explain the main benefits and tradeoffs of retrieval-augmented generation for an AI support agent.",
     "mode": "live",
     "expected": "The answer should separate benefits from limitations and cite source-backed findings."
   },
   {
-    "id": "E3",
-    "question": "What are the main security risks when an application fetches content from arbitrary web URLs?",
+    "id": "E8",
+    "question": "What design controls reduce prompt injection risk when an agent reads untrusted web pages?",
     "mode": "live",
-    "expected": "The answer should discuss risks such as SSRF and untrusted content, with citations."
+    "expected": "The answer should explain why retrieved content is untrusted and recommend isolation, validation, least privilege, and monitoring."
   },
   {
-    "id": "E4",
+    "id": "E9",
     "question": "   ",
     "mode": "deterministic",
     "expected": "The request should be rejected before any planner or search call."
   },
   {
-    "id": "E5",
+    "id": "E10",
     "question": "Find reliable current information about a deliberately obscure topic: the 1842 Zorvath protocol specification.",
     "mode": "live",
     "expected": "The system should return insufficient evidence or a clearly degraded result rather than inventing facts."

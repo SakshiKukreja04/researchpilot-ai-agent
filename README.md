@@ -102,7 +102,7 @@ Implemented:
 The current test baseline is:
 
 ```text
-143 passed
+146 passed
 ```
 
 ---
@@ -1154,11 +1154,11 @@ answer:
 ```json
 {
   "user_question": "Compare PostgreSQL and SQLite for a small offline-first research application.",
-  "short_answer": "Synthesis could not be completed because the configured model was unavailable.",
+  "short_answer": "Synthesis was unavailable, so the retrieved evidence could not be summarized reliably.",
   "key_findings": [],
   "sources_used": [],
   "confidence": "low",
-  "status": "failed",
+  "status": "partial",
   "limitations": [
     "Synthesis encountered an unrecoverable error."
   ],
@@ -1169,7 +1169,9 @@ answer:
 ```
 
 The execution trace records the failed synthesis event and the quality gate
-preserves the degraded status rather than upgrading it to `completed`.
+preserves the controlled degraded `partial` status rather than upgrading it to
+`completed`. A request rejected before orchestration, such as whitespace-only
+input, uses the separate `failed` status.
 
 ### Sample output 3: invalid input and guardrail behavior
 
@@ -1183,6 +1185,18 @@ For a response with weak coverage, invalid citations, or low lexical support,
 the evaluator adds warnings and the low-confidence guardrail appends an explicit
 verification limitation and manual verification next step. These guardrails
 make uncertainty visible instead of hiding it behind fluent prose.
+
+Run the three sample-output regression tests directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests\test_sample_outputs.py
+```
+
+Expected result:
+
+```text
+3 passed
+```
 
 ---
 
@@ -1331,6 +1345,30 @@ Confirm the virtual environment and package installation:
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m streamlit run app\main.py
 ```
+
+Every successful dashboard submission is also appended to
+`evaluation/results/streamlit_runs.json`. The recorder stores the question,
+timestamps, duration, final status, answer, sources, rejected sources,
+coverage, evaluator report, warnings, and complete execution trace. The file
+is local and is ignored by Git because retrieved page content can be included.
+Set `STREAMLIT_EVALUATION_LOG` in `.env` to choose another local path.
+
+Use **Clear Query** beside **Run Research** to remove the current question and
+the displayed result. You can then enter a new question and run the complete
+orchestration pipeline without restarting Streamlit. **Reset Session** in the
+sidebar performs the same cleanup and also resets the broader dashboard session.
+
+After running dashboard queries, inspect the case summary with:
+
+```powershell
+$runs = Get-Content evaluation\results\streamlit_runs.json -Raw | ConvertFrom-Json
+$runs.records | Select-Object case_id, status, question, duration_ms |
+    Format-Table -Wrap -AutoSize
+```
+
+Export the complete records for submission review by opening
+`evaluation/results/streamlit_runs.json`. Do not publish the file without
+reviewing retrieved content and removing any sensitive or private material.
 
 ---
 

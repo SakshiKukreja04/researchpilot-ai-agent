@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import datetime, timezone
 import logging
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ import streamlit as st
 from app.config import get_settings
 from app.logging_config import configure_logging
 from app.orchestrator import run_full_pipeline
+from app.evaluation_recorder import record_streamlit_run
 from app.schemas import (
     ClaimSupportStatus,
     ConfidenceLevel,
@@ -64,6 +66,13 @@ def validate_user_question(question: Optional[str]) -> tuple[bool, str]:
     if len(stripped) > 1000:
         return False, "Research question cannot exceed 1000 characters."
     return True, ""
+
+
+def clear_research_session(session_state: Any) -> None:
+    """Clear the editable query and the currently displayed research result."""
+    session_state.pop("research_context", None)
+    session_state.pop("submitted_question", None)
+    session_state["question_input"] = ""
 
 
 def format_source_display_date(published_date: Optional[str]) -> str:
@@ -167,8 +176,7 @@ def _render_sidebar(settings: Any) -> bool:
 
         st.divider()
         if st.button("🗑️ Reset Session", use_container_width=True):
-            st.session_state.pop("research_context", None)
-            st.session_state.pop("submitted_question", None)
+            clear_research_session(st.session_state)
             st.rerun()
 
         st.caption("ResearchPilot v1.0 • Antigravity Phase 6")
@@ -430,16 +438,26 @@ def main() -> None:
     )
 
     # User Input Section
+    if "question_input" not in st.session_state:
+        st.session_state["question_input"] = st.session_state.get("submitted_question", "")
+
     user_query = st.text_area(
         "Enter your research question:",
-        value=st.session_state.get("submitted_question", ""),
+        key="question_input",
         placeholder="e.g. Compare Milvus and Qdrant for high-concurrency vector search. What are their memory requirements?",
         height=100,
         help="Enter a clear, specific technical or research question. Minimum 3 characters.",
     )
 
-    col1, col2 = st.columns([1, 5])
+    col1, col2 = st.columns([1, 1])
     run_btn = col1.button("🚀 Run Research", type="primary", use_container_width=True)
+    col2.button(
+        "✖️ Clear Query",
+        use_container_width=True,
+        help="Clear the current question and remove the displayed result.",
+        on_click=clear_research_session,
+        args=(st.session_state,),
+    )
 
     if run_btn:
         is_valid, err_msg = validate_user_question(user_query)
@@ -456,6 +474,7 @@ def main() -> None:
             return
 
         st.session_state["submitted_question"] = user_query.strip()
+        started_at = datetime.now(timezone.utc)
 
         # Execute bounded research through the orchestrator as the single entry point
         with st.status("Executing research inquiry...", expanded=True) as status_box:
@@ -473,6 +492,17 @@ def main() -> None:
                     verify_claims=verify_claims,
                     progress_callback=progress_callback,
                 )
+                try:
+                    log_path = record_streamlit_run(
+                        context,
+                        started_at=started_at,
+                    )
+                    logger.info("Streamlit evaluation run recorded at %s", log_path)
+                except OSError as record_error:
+                    logger.error(
+                        "Could not persist Streamlit evaluation run: %s",
+                        record_error,
+                    )
                 status_box.update(
                     label=f"Completed with status: {context.status.value}",
                     state="complete" if context.status == ResearchAnswerStatus.COMPLETED else "error",
@@ -492,4 +522,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
