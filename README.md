@@ -1,4 +1,32 @@
-# ResearchPilot — Production-Oriented AI Research Agent
+<div align="center">
+
+# ResearchPilot
+
+### A traceable, evidence-aware AI research agent
+
+Plan research questions, discover sources, validate evidence, and return
+structured answers with citations, confidence, limitations, and an inspectable
+execution trace.
+
+<p>
+  <img src="https://img.shields.io/badge/status-production--oriented%20prototype-2563EB?style=for-the-badge" alt="Production-oriented prototype">
+  <img src="https://img.shields.io/badge/tests-150%20passed-16A34A?style=for-the-badge" alt="150 tests passed">
+  <img src="https://img.shields.io/badge/python-3.12%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12 or newer">
+  <img src="https://img.shields.io/badge/UI-Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" alt="Streamlit">
+</p>
+
+</div>
+
+## At a glance
+
+| | |
+|---|---|
+| **Input** | A natural-language research question |
+| **Workflow** | Plan → Search → Fetch → Score → Synthesize → Validate |
+| **Search resilience** | Primary `ddgs` search with a bounded Bing fallback |
+| **Output** | Structured answer, findings, citations, confidence, limitations |
+| **Visibility** | Plan, queries, source decisions, timings, warnings, and trace |
+| **Safety posture** | SSRF-oriented URL checks, untrusted-content handling, budgets |
 
 ResearchPilot is a bounded, inspectable AI research agent that converts a
 research question into a structured plan, gathers information from the web,
@@ -99,10 +127,10 @@ Implemented:
 - Deterministic test suite
 - Evaluation case runner
 
-The current test baseline is:
+The current verified test baseline is:
 
 ```text
-146 passed
+150 passed
 ```
 
 ---
@@ -162,16 +190,23 @@ deterministic fallback plan.
 
 #### `web_search`
 
-Uses `ddgs` to discover candidate pages. It supports:
+Uses `ddgs` to discover candidate pages with a bounded fallback path:
 
 - query validation
 - Unicode and punctuation normalization
 - bounded result counts
 - empty-result simplification
+- Bing fallback after a primary provider error or empty result
 - URL normalization
 - duplicate removal
 - malformed-result skipping
 - timeout and rate-limit handling
+
+The fallback is configured with `SEARCH_FALLBACK_BACKEND=bing`. It uses the
+same `ddgs` integration and does not require a separate Bing SDK or API key.
+Bing only discovers candidate URLs; every result still passes URL validation,
+safe fetching, extraction, evidence scoring, citation validation, and synthesis
+quality gates.
 
 #### `fetch_and_extract`
 
@@ -341,6 +376,8 @@ flowchart TD
     PLAN --> ORCH[Deterministic orchestrator]
 
     ORCH --> SEARCH[web_search]
+    SEARCH -->|Primary provider fails or returns no results| FALLBACK[Bing fallback via DDGS]
+    FALLBACK --> SEARCH
     SEARCH --> RESULTS[SearchResult records]
     RESULTS --> FETCH[fetch_and_extract]
     FETCH --> DOCS[SourceDocument records]
@@ -395,7 +432,41 @@ fails and fallback is enabled, a deterministic plan is generated.
 
 The orchestrator executes only allowlisted search tools. It enforces query
 budgets, normalizes model-generated queries, records search events, and
-handles empty or failed searches.
+handles empty or failed searches. The search tool now uses a bounded secondary
+provider path:
+
+1. Query the primary `ddgs` provider.
+2. If the provider errors or returns no results, try the configured fallback
+   backend through `ddgs` (Bing by default).
+3. If both provider attempts are empty, make at most one less-specific query
+   retry.
+
+The fallback does not expand the orchestrator's query budget, does not bypass
+URL safety or evidence filtering, and is disabled for injected test clients so
+tests remain deterministic. Configure it with:
+
+```dotenv
+SEARCH_FALLBACK_BACKEND=bing
+```
+
+The fallback is a candidate-discovery resilience measure, not a guarantee of
+freshness, relevance, or source availability. Every result still passes URL
+validation, safe fetching, extraction, evidence scoring, citation validation,
+and synthesis quality gates.
+
+#### Search resilience at a glance
+
+| Situation | System behavior | Safety boundary |
+|---|---|---|
+| Primary search returns results | Use the normalized primary results | Continue to fetch and score normally |
+| Primary search errors or is empty | Try the configured Bing backend once | Does not increase the query budget |
+| Both attempts are empty | Try one simplified query | No unbounded search loop |
+| A candidate page is unsafe or unavailable | Reject or record the source-level failure | Continue with other candidates when possible |
+| A fallback result is accepted | Include it in normal evidence processing | It is never trusted solely because Bing returned it |
+
+Search and fallback attempts are visible in the execution trace, making it
+possible to distinguish provider availability problems from fetch, extraction,
+evidence, or synthesis failures.
 
 ### Stage 4: Retrieve
 
@@ -590,6 +661,11 @@ The application loads `.env` from the project root using `python-dotenv`.
 | `MAX_RETRIES_PER_TOOL` | No | Retry limit per tool | `1` |
 | `OVERALL_DEADLINE_SECONDS` | No | End-to-end deadline | `90.0` |
 | `MAX_EXTRACTED_CHARS_PER_SOURCE` | No | Extraction limit per source | `8000` |
+| `CACHE_ENABLED` | No | Enable bounded in-memory search/extraction cache | `true` |
+| `CACHE_TTL_SECONDS` | No | Cache entry lifetime | `300` |
+| `CACHE_MAX_ENTRIES` | No | Maximum cache entries | `128` |
+| `SEARCH_FALLBACK_BACKEND` | No | Secondary `ddgs` backend after primary failure/empty results | `bing` |
+| `STREAMLIT_EVALUATION_LOG` | No | JSON file for recorded Streamlit runs | `evaluation/results/streamlit_runs.json` |
 
 Example:
 
@@ -606,6 +682,11 @@ MAX_RESEARCH_ROUNDS=1
 MAX_RETRIES_PER_TOOL=1
 OVERALL_DEADLINE_SECONDS=90.0
 MAX_EXTRACTED_CHARS_PER_SOURCE=8000
+CACHE_ENABLED=true
+CACHE_TTL_SECONDS=300
+CACHE_MAX_ENTRIES=128
+SEARCH_FALLBACK_BACKEND=bing
+STREAMLIT_EVALUATION_LOG=evaluation/results/streamlit_runs.json
 ```
 
 The API key is never intentionally printed, logged, included in prompts, or
@@ -1039,7 +1120,7 @@ Run:
 Current verified baseline:
 
 ```text
-141 passed
+150 passed
 ```
 
 ### Dependency verification
@@ -1060,11 +1141,16 @@ Evaluation definitions are in [evaluation/test_cases.json](evaluation/test_cases
 
 The current cases include:
 
-1. PostgreSQL versus SQLite comparison
-2. RAG benefits and tradeoffs
-3. Security risks of arbitrary URL fetching
-4. Empty input
-5. Deliberately obscure topic
+1. Top three open-source vector databases for RAG
+2. Indian B2B SaaS startups in HR technology
+3. Multi-agent architecture for customer support automation
+4. Memory approaches in AI support agents
+5. Security risks of arbitrary URL fetching
+6. PostgreSQL versus SQLite comparison
+7. RAG benefits and tradeoffs
+8. Prompt-injection controls for untrusted web content
+9. Empty input
+10. Deliberately obscure topic
 
 Run deterministic cases:
 
@@ -1108,6 +1194,81 @@ For a stronger submission, add:
 
 Evaluation results should always record the date, configured model, environment,
 denominators, and limitations.
+
+### Real Streamlit evaluation results
+
+The following cases are taken from the recorded
+[Streamlit evaluation artifact](evaluation/results/streamlit_runs.json). They
+are representative live runs, not synthetic fixtures. A completed status means
+the workflow returned an answer; it does not mean every requested criterion was
+supported or that every factual claim was independently verified.
+
+#### Case 1: successful vector-database comparison
+
+| Metric | Observed result |
+|---|---|
+| Input question | “Compare the top 3 open-source vector databases for a startup building RAG products” |
+| Expected behavior | Retrieve comparative evidence, produce a structured comparison, preserve citations, and disclose limitations |
+| Status and duration | `completed`, approximately 56.1 seconds |
+| Retrieval | 7 accepted sources, 0 rejected sources; the run completed the retrieval path without a recorded fetch failure |
+| Coverage | `1.00` (all 6 planned subquestions supported) |
+| Findings and citations | 3 findings; 7 citations, all valid; grounding rate `1.00` |
+| Confidence | `high` under the rule-governed quality gate |
+
+What worked well: the planner, bounded search/fetch workflow, evidence filter,
+synthesis, and citation registry produced a complete structured result. The
+answer included limitations rather than claiming that one database is
+universally best.
+
+What still needs review: the sources included detailed third-party benchmark
+claims. The result demonstrates pipeline behavior and citation consistency; it
+should not be treated as an independently reproduced performance benchmark
+without running the databases on a representative startup workload.
+
+#### Case 2: successful prompt-injection-control research
+
+| Metric | Observed result |
+|---|---|
+| Input question | “What design controls reduce prompt injection risk when an agent reads untrusted web pages?” |
+| Expected behavior | Treat retrieved pages as untrusted data, retrieve security guidance, and return cited controls without executing page instructions |
+| Status and duration | `completed`, approximately 49.0 seconds |
+| Retrieval | 7 accepted sources, 0 rejected sources; one page fetch failed and was skipped without aborting the run |
+| Coverage | `1.00` |
+| Findings and citations | 8 findings; 9 citations, all valid; grounding rate `1.00` |
+| Confidence | `high` in the recorded run |
+
+What worked well: a source-level fetch failure remained isolated, while the
+remaining evidence was still used. The result exercised the system's
+untrusted-content boundary and returned traceable findings rather than treating
+web-page instructions as executable instructions.
+
+Data-quality note: the recorded Streamlit question contains a trailing
+`\",` after the question mark. The run still completed, but the input should be
+corrected in future evaluation data so punctuation does not affect query
+normalization or reproducibility.
+
+#### Case 3: controlled insufficient-evidence behavior
+
+| Metric | Observed result |
+|---|---|
+| Input question | “Find reliable current information about a deliberately obscure topic: the 1842 Zorvath protocol specification” |
+| Expected behavior | Avoid inventing an answer when the topic cannot be substantiated; expose evidence gaps and request verification |
+| Status and duration | `insufficient_evidence`, approximately 64.7 seconds |
+| Retrieval | 2 accepted sources, 1 rejected source; 4 page fetch attempts failed or were unsupported, including an unsupported PDF |
+| Coverage | `0.167` (approximately 17%); 5 planned subquestions lacked sufficient evidence |
+| Findings and citations | 0 findings and 0 citations |
+| Confidence | `low` |
+
+What worked well: the system refused to fabricate protocol details, preserved the
+insufficient-evidence status, and activated the low-confidence guardrail with
+verification guidance. Fetch failures were recorded instead of being silently
+converted into evidence.
+
+What did not work: search returned a small number of unrelated or
+unsubstantiated candidates, so the run spent time attempting pages that could
+not establish the topic. This is an expected limitation of open-web discovery,
+not evidence that the protocol exists. The case is valuable as a negative test
+because it verifies non-fabrication and explicit uncertainty handling.
 
 ### Sample output 1: successful comparison research
 
@@ -1302,12 +1463,15 @@ This can be caused by:
 
 - provider rate limiting
 - temporary provider failure
+- both the primary provider and configured fallback provider being unavailable
 - an overly specific query
 - unsupported punctuation
 - a genuinely obscure topic
 
-The search tool normalizes queries and performs one bounded simplification, but
-it cannot guarantee provider availability.
+The search tool normalizes queries, tries the configured Bing fallback after a
+primary failure or empty result, and performs one bounded simplification. It
+still cannot guarantee provider availability. Inspect the trace for the
+provider/fallback events and confirm `SEARCH_FALLBACK_BACKEND=bing` is set.
 
 ### Page fetch fails
 
