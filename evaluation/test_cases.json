@@ -1,0 +1,32 @@
+[
+  {
+    "id": "E1",
+    "question": "Compare PostgreSQL and SQLite for a small offline-first research application.",
+    "mode": "live",
+    "expected": "The answer should compare common criteria, cite retrieved sources, and disclose evidence gaps."
+  },
+  {
+    "id": "E2",
+    "question": "Explain the main benefits and tradeoffs of retrieval-augmented generation for an AI support agent.",
+    "mode": "live",
+    "expected": "The answer should separate benefits from limitations and cite source-backed findings."
+  },
+  {
+    "id": "E3",
+    "question": "What are the main security risks when an application fetches content from arbitrary web URLs?",
+    "mode": "live",
+    "expected": "The answer should discuss risks such as SSRF and untrusted content, with citations."
+  },
+  {
+    "id": "E4",
+    "question": "   ",
+    "mode": "deterministic",
+    "expected": "The request should be rejected before any planner or search call."
+  },
+  {
+    "id": "E5",
+    "question": "Find reliable current information about a deliberately obscure topic: the 1842 Zorvath protocol specification.",
+    "mode": "live",
+    "expected": "The system should return insufficient evidence or a clearly degraded result rather than inventing facts."
+  }
+]
