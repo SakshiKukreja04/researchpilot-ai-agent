@@ -121,19 +121,34 @@ def verify_claim_support(
 def determine_rule_based_confidence(
     context: ResearchContext,
     unsupported_claims_count: int = 0,
+    *,
+    answer_status: ResearchAnswerStatus = ResearchAnswerStatus.COMPLETED,
+    grounding_rate: float = 1.0,
+    citation_coverage_rate: float = 1.0,
+    has_ungrounded_short_answer: bool = False,
 ) -> ConfidenceLevel:
     """Compute rule-based confidence from observable evidence metrics.
 
     Rules:
     - HIGH: coverage >= 0.70, at least 2 accepted sources, avg quality >= 0.65,
-      and 0 unsupported claims.
-    - MEDIUM: coverage >= 0.40, at least 1 accepted source, and <= 1 unsupported claim.
-    - LOW: coverage < 0.40, 0 accepted sources, or multiple unsupported claims.
+      all findings cited and grounded, no ungrounded short-answer sentences, and
+      0 unsupported claims. Partial answers are capped at MEDIUM.
+    - MEDIUM: coverage >= 0.40, at least 1 accepted source, and no severe
+      grounding or unsupported-claim failures.
+    - LOW: failed/empty synthesis, coverage < 0.40, no sources, or multiple
+      unsupported claims.
     """
     coverage_ratio = context.coverage.coverage_ratio
     sources_count = len(context.sources)
 
-    if sources_count == 0 or coverage_ratio < 0.40 or unsupported_claims_count > 1:
+    if (
+        answer_status in {ResearchAnswerStatus.FAILED, ResearchAnswerStatus.INSUFFICIENT_EVIDENCE}
+        or sources_count == 0
+        or coverage_ratio < 0.40
+        or unsupported_claims_count > 1
+        or grounding_rate < 0.50
+        or citation_coverage_rate < 0.50
+    ):
         return ConfidenceLevel.LOW
 
     avg_quality = (
@@ -167,8 +182,13 @@ def determine_rule_based_confidence(
         and sources_count >= 2
         and avg_quality >= 0.65
         and unsupported_claims_count == 0
+        and grounding_rate >= 0.80
+        and citation_coverage_rate == 1.0
+        and not has_ungrounded_short_answer
     ):
-        return ConfidenceLevel.MEDIUM if source_quality_cap_applies else ConfidenceLevel.HIGH
+        if source_quality_cap_applies or answer_status == ResearchAnswerStatus.PARTIAL:
+            return ConfidenceLevel.MEDIUM
+        return ConfidenceLevel.HIGH
 
     return ConfidenceLevel.MEDIUM
 
@@ -276,6 +296,7 @@ def run_quality_gate(
     unsupported_count = 0
 
     for finding in answer.key_findings:
+        finding_unsupported = False
         valid_sids = []
         for sid in finding.source_ids:
             if sid in known_source_registry:
@@ -289,13 +310,13 @@ def run_quality_gate(
         if re.search(r"\b(implied|inferred|not in (?:the )?sources)\b", finding.explanation or "", re.IGNORECASE):
             finding_support = ClaimSupportStatus.UNSUPPORTED
             warnings.append(f"Finding marked unsupported because its explanation is not source-grounded: {finding.claim[:80]}")
-            unsupported_count += 1
+            finding_unsupported = True
         if not valid_sids:
             warnings.append(
                 f"Finding '{finding.claim[:40]}...' has no valid citations; marked ungrounded."
             )
             finding_support = ClaimSupportStatus.UNSUPPORTED
-            unsupported_count += 1
+            finding_unsupported = True
 
         # 2. Claim-Support Verification (Optional/Targeted)
         if verify_claims and client is not None and valid_sids:
@@ -306,11 +327,16 @@ def run_quality_gate(
                 warnings.append(
                     f"Claim verification failed for '{finding.claim[:40]}...': {ver_res.explanation}"
                 )
-                unsupported_count += 1
+                finding_unsupported = True
             elif ver_res.status == ClaimSupportStatus.PARTIALLY_SUPPORTED:
                 warnings.append(
                     f"Claim only partially supported: '{finding.claim[:40]}...': {ver_res.explanation}"
                 )
+
+        if finding_support == ClaimSupportStatus.UNSUPPORTED:
+            finding_unsupported = True
+        if finding_unsupported:
+            unsupported_count += 1
 
         validated_findings.append(
             finding.model_copy(
@@ -445,21 +471,12 @@ def run_quality_gate(
             )
         )
 
-    # 4. Enforce Deterministic Confidence Policy
-    rule_confidence = (
-        determine_rule_based_confidence(
-            context,
-            unsupported_claims_count=unsupported_count,
-        )
-        if answer.status == ResearchAnswerStatus.COMPLETED
-        else ConfidenceLevel.LOW
-    )
-    if answer.confidence != rule_confidence:
-        warnings.append(
-            f"Confidence adjusted from '{answer.confidence.value}' to rule-governed '{rule_confidence.value}'."
-        )
+    # Evaluate claims before assigning confidence so unsupported prose cannot
+    # be hidden by high plan coverage or citation-ID validity alone.
+    evaluation = evaluate_answer(answer, typed_sources)
+    object.__setattr__(context, "evaluation", evaluation)
 
-    # 5. Low-Coverage Warning & Limitations Adjustment
+    # 4. Low-Coverage Warning & Limitations Adjustment
     updated_limitations = list(answer.limitations)
     if context.coverage.coverage_ratio < 0.60:
         cov_warning = (
@@ -494,8 +511,20 @@ def run_quality_gate(
             "by explicit evidence and synthesis thresholds."
         )
 
-    evaluation = evaluate_answer(answer, typed_sources)
-    object.__setattr__(context, "evaluation", evaluation)
+    # 5. Enforce confidence using the final status and claim-level evaluation.
+    rule_confidence = determine_rule_based_confidence(
+        context,
+        unsupported_claims_count=unsupported_count,
+        answer_status=final_status,
+        grounding_rate=evaluation.grounding_rate,
+        citation_coverage_rate=evaluation.citation_coverage_rate,
+        has_ungrounded_short_answer=bool(evaluation.short_answer_ungrounded),
+    )
+    if answer.confidence != rule_confidence:
+        warnings.append(
+            f"Confidence adjusted from '{answer.confidence.value}' to rule-governed '{rule_confidence.value}'."
+        )
+
     if evaluation and evaluation.short_answer_ungrounded:
         status_reasons.append(
             _reason(
@@ -503,8 +532,6 @@ def run_quality_gate(
                 f"{len(evaluation.short_answer_ungrounded)} short-answer sentence(s) lack finding support.",
             )
         )
-        if rule_confidence == ConfidenceLevel.HIGH:
-            rule_confidence = ConfidenceLevel.MEDIUM
 
     object.__setattr__(context, "status_reasons", status_reasons)
     hardened_answer = answer.model_copy(

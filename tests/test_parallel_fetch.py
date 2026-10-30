@@ -114,6 +114,77 @@ def test_fetch_budget_and_duplicate_normalization():
     assert len(context.trace) > 0
 
 
+def test_fetch_budget_is_shared_across_search_queries():
+    plan_json = (
+        '{"objective":"Compare three vector databases","subquestions":["RAG features"],'
+        '"search_queries":["Milvus documentation","Weaviate documentation","Qdrant documentation"],'
+        '"tools":["web_search","fetch_and_extract"],"success_criteria":["features"],'
+        '"requires_fresh_evidence":false}'
+    )
+    query_results = {
+        "Milvus documentation": [
+            SearchResult(
+                title=f"Milvus guide {index}",
+                url=f"https://milvus.io/docs/{index}",
+                snippet="Milvus vector database documentation",
+            )
+            for index in range(5)
+        ],
+        "Weaviate documentation": [
+            SearchResult(
+                title=f"Weaviate guide {index}",
+                url=f"https://weaviate.io/docs/{index}",
+                snippet="Weaviate vector database documentation",
+            )
+            for index in range(5)
+        ],
+        "Qdrant documentation": [
+            SearchResult(
+                title=f"Qdrant guide {index}",
+                url=f"https://qdrant.tech/docs/{index}",
+                snippet="Qdrant vector database documentation",
+            )
+            for index in range(5)
+        ],
+    }
+
+    class Client:
+        model_name = "test-model"
+
+        def chat_completion(self, **_kwargs):
+            return plan_json
+
+    fetched_urls: list[str] = []
+
+    def search(query, **_kwargs):
+        return query_results[query]
+
+    def fetch(url, **_kwargs):
+        fetched_urls.append(url)
+        return _doc(url, len(fetched_urls))
+
+    run_research(
+        "Compare Milvus, Weaviate, and Qdrant for RAG",
+        settings=Settings(
+            max_search_queries=3,
+            max_fetch_pages=3,
+            max_research_rounds=0,
+            fetch_max_workers=1,
+            early_stop_min_relevance=0,
+        ),
+        client=Client(),
+        search_tool_fn=search,
+        fetch_tool_fn=fetch,
+        synthesize=False,
+    )
+
+    assert fetched_urls == [
+        "https://milvus.io/docs/0",
+        "https://weaviate.io/docs/0",
+        "https://qdrant.tech/docs/0",
+    ]
+
+
 def test_retries_cannot_exceed_total_fetch_attempt_budget():
     calls: list[str] = []
 

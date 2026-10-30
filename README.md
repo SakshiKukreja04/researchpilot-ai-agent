@@ -112,7 +112,6 @@ This separation prevents the model from directly controlling network access or
 executing arbitrary tools. It also makes the workflow easier to test and
 inspect.
 
-### Current implementation status
 
 Implemented:
 
@@ -136,13 +135,6 @@ Implemented:
 - Evaluation case runners (deterministic and live)
 - Final 15-case live evaluation with a recorded results file
 
-The current verified test baseline is:
-
-```text
-167 passed
-```
-
----
 
 ## 2. Problem Statement
 
@@ -283,6 +275,10 @@ Configurable limits cover:
 - maximum search queries
 - maximum page fetches
 - maximum research rounds
+
+When search queries cover separate comparison candidates, fetch candidates are
+selected round-robin across query result sets so early queries cannot consume
+the entire page budget before later candidates are fetched.
 - retry count
 - overall deadline
 - per-query search time cap
@@ -1035,9 +1031,9 @@ The prototype now includes bounded stretch goals:
   overlap between the claim and cited source content. This is a review signal,
   not a substitute for entailment-level verification.
 - **Evaluator/judge step:** each synthesized answer receives an
-  `AnswerEvaluation` report with citation validity, grounded-finding rate,
-  warnings, and a guardrail flag. The report is stored on the research context
-  and emitted in the validation trace.
+  `AnswerEvaluation` report with citation validity, finding citation coverage,
+  grounded-finding rate, warnings, and a guardrail flag. The report is stored
+  on the research context and emitted in the validation trace.
 - **Bounded caching:** successful real-provider search results and page
   extractions use a thread-safe in-memory TTL cache with configurable entry and
   lifetime limits. Injected test doubles bypass the cache.
@@ -1150,12 +1146,17 @@ Confidence is determined from observable evidence:
 - coverage
 - average quality score
 - unsupported claim count
+- finding citation coverage and lexical grounding
+- short-answer grounding
 - final answer status
 
 Benchmark/performance questions and source sets dominated by vendor blogs or
-non-primary sources are capped at `medium` confidence. Degraded or failed
-synthesis cannot be labeled highly confident. The final evaluation found cases
-where confidence was still too generous (section 19).
+non-primary sources are capped at `medium` confidence. A well-supported
+`partial` answer can reach `medium`, but not `high`; failed or
+insufficient-evidence answers remain `low`. `high` requires a completed answer,
+strong coverage and source quality, all findings cited and grounded, and no
+ungrounded short-answer sentences. Coverage alone is not claim verification.
+Partial synthesis is recorded separately from an actual synthesis failure.
 
 ### Explicit status thresholds
 
@@ -1295,6 +1296,7 @@ The evaluation runners record:
 - evidence coverage and confidence
 - accepted and rejected source counts
 - findings count, citation references, and citation validity rate
+- finding citation coverage and lexical grounding rate
 - warnings, limitations, and error counts by category
 - models used and the full execution trace per case
 
@@ -1782,19 +1784,6 @@ reviewing retrieved content and removing any sensitive or private material.
 | Comparison with a non-agentic baseline | Not done (future work) |
 | Production deployment | Future work |
 
-### Submission checklist
-
-- [x] Configure and verify a valid Groq model.
-- [x] Run the 15-case live evaluation and record the results.
-- [x] Add two or three sample output examples.
-- [x] Prepare the evaluation document with final observed metrics.
-- [ ] Fix the two defects (search-outage status, trace-message truncation) and rerun E8 and EC4.
-- [ ] Complete the manual verification items listed in section 16.
-- [ ] Record a 3–5 minute demo.
-- [ ] Verify no `.env`, secrets, or private logs are committed.
-- [ ] Share repository link, demo link, evaluation notes, and setup instructions.
-
----
 
 ## 21. Assignment Questions and Sample Outputs
 

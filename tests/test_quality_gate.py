@@ -165,7 +165,18 @@ def test_sources_used_includes_valid_finding_citations():
 def test_confidence_policy_downgrades_high_to_medium_on_low_coverage():
     # Context coverage is only 0.45 (< 0.70 required for HIGH)
     context = _make_context(coverage_ratio=0.45, num_sources=2)
-    answer = _make_answer(confidence=ConfidenceLevel.HIGH)
+    claim = "HNSW index requires RAM proportional to vector dimension."
+    context = context.model_copy(
+        update={
+            "sources": [
+                source.model_copy(update={"content": claim * 15})
+                for source in context.sources
+            ]
+        }
+    )
+    answer = _make_answer(confidence=ConfidenceLevel.HIGH).model_copy(
+        update={"short_answer": claim}
+    )
 
     hardened_answer, warnings = run_quality_gate(answer, context, verify_claims=False)
 
@@ -180,6 +191,34 @@ def test_confidence_policy_downgrades_to_low_when_sources_empty():
 
     conf = determine_rule_based_confidence(context)
     assert conf == ConfidenceLevel.LOW
+
+
+def test_partial_answer_with_strong_evidence_is_capped_at_medium_not_low():
+    context = _make_context(coverage_ratio=0.90, num_sources=2)
+    claim = "HNSW index requires RAM proportional to vector dimension."
+    context = context.model_copy(
+        update={
+            "sources": [
+                source.model_copy(update={"content": claim * 15})
+                for source in context.sources
+            ]
+        }
+    )
+    answer = _make_answer().model_copy(
+        update={
+            "short_answer": claim,
+            "status": ResearchAnswerStatus.PARTIAL,
+            "confidence": ConfidenceLevel.LOW,
+        }
+    )
+
+    hardened_answer, _ = run_quality_gate(answer, context, verify_claims=False)
+
+    assert hardened_answer.status == ResearchAnswerStatus.PARTIAL
+    assert hardened_answer.confidence == ConfidenceLevel.MEDIUM
+    assert context.evaluation is not None
+    assert context.evaluation.grounding_rate == 1.0
+    assert context.evaluation.citation_coverage_rate == 1.0
 
 
 def test_low_coverage_appends_limitation_warning():
@@ -239,8 +278,19 @@ def test_source_mix_is_exposed_and_benchmark_confidence_is_capped():
             ],
         }
     )
+    claim = "HNSW index requires RAM proportional to vector dimension."
+    context = context.model_copy(
+        update={
+            "sources": [
+                source.model_copy(update={"content": claim * 15})
+                for source in context.sources
+            ]
+        }
+    )
     answer, warnings = run_quality_gate(
-        _make_answer(confidence=ConfidenceLevel.HIGH),
+        _make_answer(confidence=ConfidenceLevel.HIGH).model_copy(
+            update={"short_answer": claim}
+        ),
         context,
         verify_claims=False,
     )

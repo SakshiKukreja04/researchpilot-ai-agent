@@ -133,6 +133,9 @@ Follow these strict planning rules:
 3. Formulate 3 to 6 focused subquestions that collectively cover the objective without unnecessary overlap.
 4. Formulate 3 to 8 focused search queries targeting distinct evidence needs.
    Prioritize official documentation, release notes, and independent benchmarks where applicable.
+   For comparisons, include an official documentation or product query for each
+   named alternative before spending the query budget on broad comparison pages.
+   Keep independent benchmark queries separate from vendor feature claims.
    For "find/list/identify N items" requests, include a discovery query and
    entity-specific queries such as "<entity> official site", product, customers,
    positioning, and pricing queries for each named candidate.

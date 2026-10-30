@@ -431,6 +431,12 @@ def _render_results(context: ResearchContext) -> None:
         st.caption("Source mix: " + " ".join(
             f"`{item['type']}: {item['count']}`" for item in source_mix_chips(context)
         ))
+        if context.evaluation:
+            st.caption(
+                f"Claim grounding: {context.evaluation.grounded_finding_count}/"
+                f"{context.evaluation.finding_count} findings; citation coverage: "
+                f"{context.evaluation.citation_coverage_rate:.0%}."
+            )
 
     st.divider()
 

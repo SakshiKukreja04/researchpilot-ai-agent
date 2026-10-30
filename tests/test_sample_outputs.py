@@ -120,6 +120,51 @@ def test_sample_output_two_preserves_synthesis_failure():
     assert any(event.event_type == "synthesis_failed" for event in context.trace)
 
 
+def test_partial_synthesis_is_traced_as_partial_not_failed():
+    client = MagicMock(spec=GroqClientWrapper)
+    client.model_name = "test-model"
+    client.chat_completion.side_effect = [
+        _plan().model_dump_json(),
+        json.dumps(
+            {
+                "user_question": "Compare PostgreSQL and SQLite for a small offline-first research application.",
+                "short_answer": "SQLite is an embedded database that runs without a separate server.",
+                "key_findings": [
+                    {
+                        "claim": "SQLite is an embedded database that runs without a separate server.",
+                        "explanation": "The source describes SQLite as embedded.",
+                        "source_ids": ["src_abcdef12"],
+                    }
+                ],
+                "sources_used": ["src_abcdef12"],
+                "confidence": "medium",
+                "assumptions": [],
+                "limitations": ["No PostgreSQL performance evidence was retrieved."],
+                "suggested_next_steps": ["Retrieve PostgreSQL performance documentation."],
+                "status": "partial",
+            }
+        ),
+    ]
+    search, fetch = _tools()
+
+    context = run_full_pipeline(
+        "Compare PostgreSQL and SQLite for a small offline-first research application.",
+        client=client,
+        search_tool_fn=search,
+        fetch_tool_fn=fetch,
+    )
+
+    synthesis_events = [
+        event for event in context.trace if event.stage.value == "SYNTHESIZING"
+    ]
+    assert context.answer is not None
+    assert context.answer.status == ResearchAnswerStatus.PARTIAL
+    assert context.answer.confidence == ConfidenceLevel.MEDIUM
+    assert len(synthesis_events) == 1
+    assert synthesis_events[0].event_type == "synthesis_partial"
+    assert synthesis_events[0].success is True
+
+
 def test_sample_output_three_rejects_whitespace_before_external_calls():
     search = MagicMock()
     fetch = MagicMock()

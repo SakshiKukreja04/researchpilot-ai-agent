@@ -355,6 +355,7 @@ def run_research(
         f"Searching web across {len(plan.search_queries)} queries...",
     )
     all_search_results: list[SearchResult] = []
+    search_result_groups: list[list[SearchResult]] = []
     seen_search_urls: set[str] = set()
     search_stage_started = time.monotonic()
     search_stage_deadline = min(
@@ -474,6 +475,7 @@ def run_research(
         return []
 
     def _record_search_results(results: list[SearchResult]) -> None:
+        search_result_groups.append(results)
         for result in results:
             if result.url not in seen_search_urls:
                 seen_search_urls.add(result.url)
@@ -721,28 +723,38 @@ def run_research(
     )
     candidate_urls: list[str] = []
     candidate_seen: set[str] = set()
-    for item in all_search_results:
-        normalized = normalize_url(item.url)
-        if not normalized or normalized in candidate_seen:
-            continue
-        if not legacy_injected_fetch:
-            safe, _ = is_safe_url(normalized, resolve_dns=False)
-            if not safe:
-                _record_event(
-                    ExecutionEvent(
-                        run_id=run_id,
-                        stage=WorkflowStage.RETRIEVING,
-                        event_type="unsafe_url_blocked",
-                        success=False,
-                        error_category=ErrorCategory.UNSAFE_URL,
-                        message=f"Blocked unsafe destination before fetch: {normalized}",
-                    ),
-                    tool_name="fetch_and_extract",
-                )
-                candidate_seen.add(normalized)
+    max_results_per_query = max(
+        (len(results) for results in search_result_groups),
+        default=0,
+    )
+    for result_index in range(max_results_per_query):
+        for results in search_result_groups:
+            if result_index >= len(results):
                 continue
-        candidate_seen.add(normalized)
-        candidate_urls.append(normalized)
+            item = results[result_index]
+            normalized = normalize_url(item.url)
+            if not normalized or normalized in candidate_seen:
+                continue
+            if not legacy_injected_fetch:
+                safe, _ = is_safe_url(normalized, resolve_dns=False)
+                if not safe:
+                    _record_event(
+                        ExecutionEvent(
+                            run_id=run_id,
+                            stage=WorkflowStage.RETRIEVING,
+                            event_type="unsafe_url_blocked",
+                            success=False,
+                            error_category=ErrorCategory.UNSAFE_URL,
+                            message=f"Blocked unsafe destination before fetch: {normalized}",
+                        ),
+                        tool_name="fetch_and_extract",
+                    )
+                    candidate_seen.add(normalized)
+                    continue
+            candidate_seen.add(normalized)
+            candidate_urls.append(normalized)
+            if len(candidate_urls) >= budget.max_fetch_pages:
+                break
         if len(candidate_urls) >= budget.max_fetch_pages:
             break
 
@@ -1215,10 +1227,18 @@ def run_research(
             syn_start = time.monotonic()
             try:
                 draft_answer = synthesize_research_answer(intermediate_ctx, client=client)
-                synthesis_succeeded = draft_answer.status in {
-                    ResearchAnswerStatus.COMPLETED,
-                    ResearchAnswerStatus.INSUFFICIENT_EVIDENCE,
-                }
+                synthesis_failed = (
+                    draft_answer.status == ResearchAnswerStatus.FAILED
+                    or any(
+                        limitation.startswith("Synthesis failure:")
+                        for limitation in draft_answer.limitations
+                    )
+                )
+                synthesis_partial = (
+                    draft_answer.status == ResearchAnswerStatus.PARTIAL
+                    and not synthesis_failed
+                )
+                synthesis_succeeded = not synthesis_failed
                 active_model = getattr(client, "active_model_name", None)
                 if not isinstance(active_model, str):
                     active_model = getattr(client, "model_name", None)
@@ -1227,21 +1247,27 @@ def run_research(
                         run_id=run_id,
                         stage=WorkflowStage.SYNTHESIZING,
                         event_type=(
-                            "synthesis_completed"
-                            if synthesis_succeeded
-                            else "synthesis_failed"
+                            "synthesis_failed"
+                            if synthesis_failed
+                            else "synthesis_partial"
+                            if synthesis_partial
+                            else "synthesis_completed"
                         ),
                         duration_ms=(time.monotonic() - syn_start) * 1000.0,
                         success=synthesis_succeeded,
                         error_category=(
-                            None if synthesis_succeeded else ErrorCategory.UNKNOWN
+                            ErrorCategory.UNKNOWN if synthesis_failed else None
                         ),
                         model=active_model,
                         message=(
                             f"Synthesized answer with {len(draft_answer.key_findings)} findings "
                             f"using model '{active_model or 'configured'}'."
-                            if synthesis_succeeded
+                            if not synthesis_partial and not synthesis_failed
                             else (
+                                f"Synthesized a partial answer with "
+                                f"{len(draft_answer.key_findings)} findings."
+                                if synthesis_partial
+                                else
                                 "Synthesis returned a controlled degraded answer: "
                                 f"{draft_answer.status.value}."
                             )
