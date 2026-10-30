@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
+from urllib.parse import urlparse
 
 from app.llm import GroqClientWrapper
+from app.evaluator import evaluate_answer
 from app.schemas import (
     ClaimSupportStatus,
     ClaimVerificationResult,
@@ -19,6 +22,9 @@ from app.schemas import (
     ResearchAnswer,
     ResearchAnswerStatus,
     ResearchContext,
+    SourceType,
+    ReasonCode,
+    StatusReason,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,15 +142,107 @@ def determine_rule_based_confidence(
         else 0.0
     )
 
+    source_mix = [source.source_type for source in context.sources]
+    primary_count = sum(
+        source_type
+        in {
+            SourceType.OFFICIAL_DOCUMENTATION,
+            SourceType.OFFICIAL_COMPANY,
+            SourceType.ACADEMIC,
+        }
+        for source_type in source_mix
+    )
+    benchmark_claims = any(
+        term in context.request.question.lower()
+        for term in ("benchmark", "latency", "throughput", "performance")
+    )
+    source_quality_cap_applies = (
+        primary_count < max(1, len(source_mix) // 2)
+        or any(source_type == SourceType.VENDOR_BLOG for source_type in source_mix)
+        or benchmark_claims
+    )
+
     if (
         coverage_ratio >= 0.70
         and sources_count >= 2
         and avg_quality >= 0.65
         and unsupported_claims_count == 0
     ):
-        return ConfidenceLevel.HIGH
+        return ConfidenceLevel.MEDIUM if source_quality_cap_applies else ConfidenceLevel.HIGH
 
     return ConfidenceLevel.MEDIUM
+
+
+def _requested_entity_count(question: str) -> Optional[int]:
+    number_words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    match = re.search(
+        r"\b(?:find|list|identify|name|top)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+        question.lower(),
+    )
+    if not match:
+        return None
+    value = match.group(1)
+    return int(value) if value.isdigit() else number_words[value]
+
+
+def _named_entities(context: ResearchContext) -> list[str]:
+    text = " ".join(
+        [context.request.question, context.plan.objective, *context.plan.search_queries]
+    )
+    known = ("Milvus", "Weaviate", "Qdrant", "pgvector", "Pinecone", "PostgreSQL", "SQLite")
+    found: list[str] = []
+    for entity in known:
+        if re.search(rf"\b{re.escape(entity)}\b", text, re.IGNORECASE):
+            found.append(entity)
+    generic = {
+        "compare", "what", "find", "top", "best", "indian", "b2b", "saas",
+        "HR", "RAG", "AI", "SaaS", "Indian",
+    }
+    question_text = context.request.question
+    for candidate in re.findall(r"\b[A-Z][A-Za-z0-9.-]{2,}\b", question_text):
+        if (
+            candidate not in found
+            and candidate.lower() not in {item.lower() for item in generic}
+            and (
+                re.search(r"\bcompare\b", context.request.question, re.IGNORECASE)
+                or _requested_entity_count(context.request.question) is not None
+            )
+        ):
+            found.append(candidate)
+    return found[:10]
+
+
+def _entity_coverage(context: ResearchContext) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
+    for entity in _named_entities(context):
+        aliases = {entity.lower()}
+        if entity.lower() == "pgvector":
+            aliases.add("pg vector")
+        source_ids = [
+            source.source_id
+            for source in context.sources
+            if any(
+                alias in f"{source.title} {source.url} {source.content}".lower()
+                for alias in aliases
+            )
+        ]
+        result[entity] = {"supported": bool(source_ids), "source_ids": source_ids}
+    return result
+
+
+def _reason(code: ReasonCode, message: str) -> StatusReason:
+    return StatusReason(code=code, message=message)
 
 
 # ==============================================================================
@@ -170,6 +268,7 @@ def run_quality_gate(
         (validated_and_hardened_answer, list_of_warnings)
     """
     warnings: list[str] = []
+    status_reasons: list[StatusReason] = []
     known_source_registry = {doc.source_id: doc for doc in context.sources}
 
     # 1. Deterministic Citation Validation
@@ -187,6 +286,10 @@ def run_quality_gate(
                 )
 
         finding_support = finding.support_status
+        if re.search(r"\b(implied|inferred|not in (?:the )?sources)\b", finding.explanation or "", re.IGNORECASE):
+            finding_support = ClaimSupportStatus.UNSUPPORTED
+            warnings.append(f"Finding marked unsupported because its explanation is not source-grounded: {finding.claim[:80]}")
+            unsupported_count += 1
         if not valid_sids:
             warnings.append(
                 f"Finding '{finding.claim[:40]}...' has no valid citations; marked ungrounded."
@@ -220,6 +323,7 @@ def run_quality_gate(
         sid
         for finding in validated_findings
         for sid in finding.source_ids
+        if finding.support_status != ClaimSupportStatus.UNSUPPORTED
     ]
     valid_sources_used: list[str] = []
     for sid in [*answer.sources_used, *cited_source_ids]:
@@ -241,6 +345,106 @@ def run_quality_gate(
             if sid in known_source_registry and sid not in trusted_url_map:
                 trusted_url_map[sid] = known_source_registry[sid].url
 
+    source_type_mix: dict[str, int] = {}
+    official_domains = {
+        "milvus.io",
+        "weaviate.io",
+        "qdrant.tech",
+    }
+    official_repositories = {
+        ("milvus-io", "milvus"),
+        ("weaviate", "weaviate"),
+        ("qdrant", "qdrant"),
+    }
+    typed_sources = []
+    for source in context.sources:
+        updated_type = source.source_type
+        parsed_url = urlparse(source.url)
+        host = (parsed_url.hostname or "").lower().removeprefix("www.")
+        path_parts = [part.lower() for part in parsed_url.path.split("/") if part]
+        is_official_domain = any(
+            host == domain or host.endswith(f".{domain}")
+            for domain in official_domains
+        )
+        if (
+            host == "github.com"
+            and len(path_parts) >= 2
+            and (path_parts[0], path_parts[1]) in official_repositories
+        ):
+            updated_type = SourceType.OFFICIAL_REPO
+        elif is_official_domain and updated_type not in {
+            SourceType.OFFICIAL_DOCUMENTATION,
+            SourceType.OFFICIAL_REPO,
+        }:
+            updated_type = SourceType.OFFICIAL_COMPANY
+        if updated_type != source.source_type:
+            source = source.model_copy(update={"source_type": updated_type})
+        typed_sources.append(source)
+        key = source.source_type.value
+        source_type_mix[key] = source_type_mix.get(key, 0) + 1
+    object.__setattr__(context, "sources", typed_sources)
+    if source_type_mix:
+        warnings.append(
+            "Source mix: "
+            + ", ".join(f"{key}={value}" for key, value in sorted(source_type_mix.items()))
+        )
+
+    entity_coverage = _entity_coverage(context)
+    object.__setattr__(context, "entity_coverage", entity_coverage)
+    missing_entities = [
+        entity for entity, item in entity_coverage.items() if not item["supported"]
+    ]
+    if missing_entities:
+        status_reasons.append(
+            _reason(
+                ReasonCode.ENTITY_NO_EVIDENCE,
+                f"No evidence for: {', '.join(missing_entities)}",
+            )
+        )
+        warnings.append(f"No evidence for: {', '.join(missing_entities)}")
+        object.__setattr__(context, "coverage", context.coverage.model_copy(
+            update={
+                "coverage_ratio": min(
+                    context.coverage.coverage_ratio,
+                    max(0.0, (len(entity_coverage) - len(missing_entities)) / max(1, len(entity_coverage))),
+                ),
+                "is_adequate": False,
+            }
+        ))
+
+    requested_count = _requested_entity_count(context.request.question)
+    entity_warning = False
+    if requested_count is not None:
+        distinct_entities = {entity.strip().lower() for entity in answer.entities if entity.strip()}
+        if len(distinct_entities) < requested_count:
+            entity_warning = True
+            warnings.append(
+                f"Entity-count check: requested {requested_count} items but the answer identified "
+                f"{len(distinct_entities)} distinct entities."
+            )
+            status_reasons.append(
+                _reason(
+                    ReasonCode.ENTITY_COUNT_SHORT,
+                    f"Requested {requested_count} entities but only {len(distinct_entities)} were identified.",
+                )
+            )
+
+    if context.coverage.coverage_ratio < 0.60:
+        status_reasons.append(
+            _reason(
+                ReasonCode.LOW_COVERAGE,
+                f"Evidence coverage is {context.coverage.coverage_ratio:.0%}.",
+            )
+        )
+
+    if unsupported_count:
+        status_reasons.append(
+            _reason(
+                ReasonCode.UNSUPPORTED_FINDINGS,
+                f"{unsupported_count} finding(s) were unsupported or lacked valid citations.",
+            )
+        )
+
     # 4. Enforce Deterministic Confidence Policy
     rule_confidence = (
         determine_rule_based_confidence(
@@ -252,8 +456,7 @@ def run_quality_gate(
     )
     if answer.confidence != rule_confidence:
         warnings.append(
-            f"Confidence adjusted from '{answer.confidence.value}' to rule-governed '{rule_confidence.value}' "
-            f"based on coverage ({context.coverage.coverage_ratio:.2f}) and evidence metrics."
+            f"Confidence adjusted from '{answer.confidence.value}' to rule-governed '{rule_confidence.value}'."
         )
 
     # 5. Low-Coverage Warning & Limitations Adjustment
@@ -267,6 +470,43 @@ def run_quality_gate(
             updated_limitations.append(cov_warning)
             warnings.append(cov_warning)
 
+    if answer.status not in {
+        ResearchAnswerStatus.FAILED,
+        ResearchAnswerStatus.INSUFFICIENT_EVIDENCE,
+    }:
+        if not context.sources or context.coverage.coverage_ratio < 0.40:
+            final_status = ResearchAnswerStatus.INSUFFICIENT_EVIDENCE
+        elif (
+            answer.status == ResearchAnswerStatus.PARTIAL
+            or context.coverage.coverage_ratio < 0.60
+            or entity_warning
+            or missing_entities
+        ):
+            final_status = ResearchAnswerStatus.PARTIAL
+        else:
+            final_status = ResearchAnswerStatus.COMPLETED
+    else:
+        final_status = answer.status
+
+    if final_status != answer.status:
+        warnings.append(
+            f"Status adjusted from '{answer.status.value}' to '{final_status.value}' "
+            "by explicit evidence and synthesis thresholds."
+        )
+
+    evaluation = evaluate_answer(answer, typed_sources)
+    object.__setattr__(context, "evaluation", evaluation)
+    if evaluation and evaluation.short_answer_ungrounded:
+        status_reasons.append(
+            _reason(
+                ReasonCode.UNGROUNDED_SHORT_ANSWER,
+                f"{len(evaluation.short_answer_ungrounded)} short-answer sentence(s) lack finding support.",
+            )
+        )
+        if rule_confidence == ConfidenceLevel.HIGH:
+            rule_confidence = ConfidenceLevel.MEDIUM
+
+    object.__setattr__(context, "status_reasons", status_reasons)
     hardened_answer = answer.model_copy(
         update={
             "key_findings": validated_findings,
@@ -274,7 +514,10 @@ def run_quality_gate(
             "source_url_map": trusted_url_map,
             "confidence": rule_confidence,
             "limitations": updated_limitations[:15],
-            "status": answer.status,
+            "status": final_status,
+            "source_type_mix": source_type_mix,
+            "status_reasons": status_reasons,
+            "short_answer_ungrounded": evaluation.short_answer_ungrounded if evaluation else [],
         }
     )
 

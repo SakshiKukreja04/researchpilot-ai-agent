@@ -24,6 +24,7 @@ from app.schemas import (
     ResearchPlan,
     ResearchRequest,
     SourceDocument,
+    SourceType,
 )
 
 
@@ -189,6 +190,122 @@ def test_low_coverage_appends_limitation_warning():
 
     assert any("Coverage note" in lim for lim in hardened_answer.limitations)
     assert any("Coverage note" in w for w in warnings)
+
+
+def test_status_thresholds_keep_adequate_completed_and_mark_partial_coverage():
+    completed_context = _make_context(coverage_ratio=0.70, num_sources=2)
+    completed_answer, _ = run_quality_gate(
+        _make_answer(confidence=ConfidenceLevel.MEDIUM),
+        completed_context,
+        verify_claims=False,
+    )
+    assert completed_answer.status == ResearchAnswerStatus.COMPLETED
+
+    partial_context = _make_context(coverage_ratio=0.50, num_sources=2)
+    partial_answer, warnings = run_quality_gate(
+        _make_answer(confidence=ConfidenceLevel.MEDIUM),
+        partial_context,
+        verify_claims=False,
+    )
+    assert partial_answer.status == ResearchAnswerStatus.PARTIAL
+    assert any("Status adjusted" in warning for warning in warnings)
+
+
+def test_find_n_quality_check_warns_when_answer_has_too_few_entities():
+    context = _make_context(coverage_ratio=0.85, num_sources=2).model_copy(
+        update={
+            "request": ResearchRequest(
+                question="Find 5 Indian B2B SaaS startups in HR tech."
+            )
+        }
+    )
+    answer = _make_answer().model_copy(update={"entities": ["Darwinbox", "Keka"]})
+
+    hardened_answer, warnings = run_quality_gate(answer, context, verify_claims=False)
+
+    assert hardened_answer.status == ResearchAnswerStatus.PARTIAL
+    assert any("requested 5 items" in warning for warning in warnings)
+
+
+def test_source_mix_is_exposed_and_benchmark_confidence_is_capped():
+    context = _make_context(coverage_ratio=0.90, num_sources=2).model_copy(
+        update={
+            "request": ResearchRequest(
+                question="Compare benchmark latency and throughput of vector databases."
+            ),
+            "sources": [
+                source.model_copy(update={"source_type": SourceType.VENDOR_BLOG})
+                for source in _make_context(coverage_ratio=0.90, num_sources=2).sources
+            ],
+        }
+    )
+    answer, warnings = run_quality_gate(
+        _make_answer(confidence=ConfidenceLevel.HIGH),
+        context,
+        verify_claims=False,
+    )
+
+    assert answer.confidence == ConfidenceLevel.MEDIUM
+    assert answer.source_type_mix == {"vendor_blog": 2}
+    assert any("Source mix" in warning for warning in warnings)
+
+
+def test_third_party_article_is_not_classified_as_official_by_mentioning_entity():
+    context = _make_context(num_sources=1)
+    source = context.sources[0].model_copy(
+        update={
+            "url": "https://app.ailog.fr/en/blog/qdrant-vector-database",
+            "domain": "app.ailog.fr",
+            "title": "Qdrant Vector Database Guide",
+            "source_type": SourceType.OTHER,
+        }
+    )
+    context = context.model_copy(
+        update={
+            "request": ResearchRequest(
+                question="Compare Milvus, Weaviate, and Qdrant vector databases."
+            ),
+            "sources": [source],
+        }
+    )
+
+    answer, _ = run_quality_gate(
+        _make_answer(), context, verify_claims=False
+    )
+
+    assert answer.source_type_mix == {"other": 1}
+
+
+@pytest.mark.parametrize(
+    ("url", "input_type", "expected_type"),
+    [
+        (
+            "https://docs.qdrant.tech/documentation/",
+            SourceType.OFFICIAL_DOCUMENTATION,
+            SourceType.OFFICIAL_DOCUMENTATION,
+        ),
+        ("https://qdrant.tech/documentation/", SourceType.OTHER, SourceType.OFFICIAL_COMPANY),
+        ("https://github.com/qdrant/qdrant", SourceType.OTHER, SourceType.OFFICIAL_REPO),
+        ("https://github.com/qdrant/qdrant-fork", SourceType.OTHER, SourceType.OTHER),
+    ],
+)
+def test_only_canonical_vendor_domains_and_repositories_are_promoted(
+    url, input_type, expected_type
+):
+    context = _make_context(num_sources=1)
+    context = context.model_copy(
+        update={
+            "sources": [
+                context.sources[0].model_copy(
+                    update={"url": url, "source_type": input_type}
+                )
+            ]
+        }
+    )
+
+    answer, _ = run_quality_gate(_make_answer(), context, verify_claims=False)
+
+    assert answer.source_type_mix == {expected_type.value: 1}
 
 
 # ==============================================================================

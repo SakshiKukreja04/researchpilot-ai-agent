@@ -16,7 +16,13 @@ from app.schemas import (
     Finding,
     SourceDocument,
     WorkflowStage,
+    ReasonCode,
+    StatusReason,
+    ResearchAnswerStatus,
 )
+from app.ui_helpers import reason_message, status_banner, aggregate_trace_errors
+from types import SimpleNamespace
+from pathlib import Path
 
 
 def test_validate_user_question():
@@ -146,3 +152,42 @@ def test_calculate_trace_metrics():
     assert metrics["total_events"] == 3
     assert metrics["tool_calls_count"] == 2
     assert metrics["failures_count"] == 1
+
+
+def _ui_context(status, coverage=1.0, reasons=None, entities=None):
+    return SimpleNamespace(
+        status=status,
+        coverage=SimpleNamespace(coverage_ratio=coverage),
+        status_reasons=reasons or [],
+        entity_coverage=entities or {},
+        error_breakdown={},
+        answer=None,
+        quality_gate_warnings=[],
+    )
+
+
+def test_status_banner_never_calls_missing_entity_evidence_green():
+    context = _ui_context(
+        ResearchAnswerStatus.COMPLETED,
+        reasons=[StatusReason(code=ReasonCode.ENTITY_NO_EVIDENCE, message="No evidence for: Qdrant")],
+    )
+    level, title, _ = status_banner(context)
+    assert level == "warning"
+    assert "gaps" in title
+
+
+def test_reason_mapping_and_error_breakdown():
+    assert "deadline" in reason_message(ReasonCode.DEADLINE_EXHAUSTED, "deadline reached")
+    event = ExecutionEvent(
+        run_id="run_1",
+        stage=WorkflowStage.SEARCHING,
+        event_type="search_query_failed",
+        success=False,
+        error_category=ErrorCategory.TIMEOUT,
+    )
+    assert aggregate_trace_errors([event]) == {"timeout": 1}
+
+
+def test_removed_legacy_footer_label():
+    source = Path(__file__).parents[1].joinpath("app", "main.py").read_text(encoding="utf-8")
+    assert "Antigravity" not in source

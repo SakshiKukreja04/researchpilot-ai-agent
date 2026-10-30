@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from typing import Any, Optional
 
-from app.config import get_settings
+from app.config import ENTITY_SEED_HEURISTIC, get_settings
+from app.safety import sanitize_research_question
 from app.llm import (
     GroqClientWrapper,
     LLMAuthError,
@@ -127,9 +129,13 @@ Follow these strict planning rules:
    - General research: Other structured investigations.
 2. Determine if the question requires recent or dated evidence (e.g. mentions "latest", "recent", "current", "today", "new release").
    If so, set "requires_fresh_evidence": true and include dated terms in your search queries.
+   Today's date is {today}. Do not add a year to a query unless the user's question contains a year.
 3. Formulate 3 to 6 focused subquestions that collectively cover the objective without unnecessary overlap.
 4. Formulate 3 to 8 focused search queries targeting distinct evidence needs.
    Prioritize official documentation, release notes, and independent benchmarks where applicable.
+   For "find/list/identify N items" requests, include a discovery query and
+   entity-specific queries such as "<entity> official site", product, customers,
+   positioning, and pricing queries for each named candidate.
 5. Allowed tools: You must ONLY select tools from this exact allowlist: ["web_search", "fetch_and_extract"].
    Do NOT propose any other tool names.
 6. Formulate 2 to 5 observable, measurable success criteria for deciding if evidence is sufficient.
@@ -146,12 +152,120 @@ You must respond strictly with a valid JSON object matching this schema:
 }
 """
 
+def _planner_prompt() -> str:
+    return PLANNER_SYSTEM_PROMPT.replace("{today}", date.today().isoformat())
+
+
+def _strip_unrequested_years(question: str, plan: ResearchPlan) -> ResearchPlan:
+    if re.search(r"\b(?:19|20)\d{2}\b", question):
+        return plan
+    queries = [
+        re.sub(r"\b(?:19|20)\d{2}\b", "", query).replace("  ", " ").strip()
+        for query in plan.search_queries
+    ]
+    return plan.model_copy(update={"search_queries": queries})
+
 
 def _detect_freshness(question: str) -> bool:
     """Detect whether a research question involves recent or date-sensitive topics."""
     lowered = question.lower()
     words = set(re.findall(r"\b\w+\b", lowered))
     return bool(words & FRESHNESS_KEYWORDS or "this year" in lowered or "current state" in lowered)
+
+
+def extract_search_entities(
+    results: list[object],
+    limit: int = 5,
+    *,
+    question: str = "",
+    plan: Optional[ResearchPlan] = None,
+) -> list[str]:
+    """Extract likely named entities from result titles and snippets.
+
+    This deliberately uses search evidence rather than a fixed vendor list.
+    """
+    generic = {
+        "official", "site", "home", "about", "best", "top", "india", "indian",
+        "startup", "startups", "software", "saas", "company", "companies",
+        "technology", "technologies", "hr", "human", "resources",
+        "we", "our", "open-source", "open", "source", "vector", "db",
+        "database", "databases", "tested",
+    }
+    result_texts = [
+        f"{getattr(result, 'title', '')} {getattr(result, 'snippet', '')}"
+        for result in results
+    ]
+    question_plan_text = " ".join(
+        [question, plan.objective if plan else "", *(plan.search_queries if plan else [])]
+    ).lower()
+    candidates: dict[str, set[int]] = {}
+    for result_index, text in enumerate(result_texts):
+        for match in re.findall(r"\b[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,2}", text):
+            candidate = " ".join(match.split()).strip(" .,-")
+            words = {word.lower() for word in candidate.split()}
+            if (
+                len(candidate) < 3
+                or words & generic
+            ):
+                continue
+            candidates.setdefault(candidate, set()).add(result_index)
+    ranked = sorted(
+        (
+            (candidate, indexes)
+            for candidate, indexes in candidates.items()
+            if len(indexes) >= 2
+        ),
+        key=lambda item: (
+            candidate.lower() not in question_plan_text,
+            -len(item[1]),
+            item[0].lower(),
+        ),
+    )
+    return [candidate for candidate, _ in ranked[:limit]]
+
+
+def _augment_entity_queries(question: str, plan: ResearchPlan) -> ResearchPlan:
+    """Add a generic official-source query for finite-list research questions.
+
+    Concrete entities are discovered from the first search result batch by the
+    orchestrator; the planner must not assume a vendor seed list.
+    """
+    number_words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    match = re.search(
+        r"\b(?:find|list|identify|name|top)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+        question.lower(),
+    )
+    if not match:
+        return plan
+
+    requested_count = (
+        int(match.group(1))
+        if match.group(1).isdigit()
+        else number_words[match.group(1)]
+    )
+    queries = list(plan.search_queries)
+    lowered = question.lower()
+    if "hr" in lowered and ("saas" in lowered or "startup" in lowered):
+        queries = [
+            f"{candidate} official site HR SaaS"
+            for candidate in ENTITY_SEED_HEURISTIC[:requested_count]
+        ] + queries
+    else:
+        queries.append(f"{question} official sources")
+
+    deduped = list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+    return plan.model_copy(update={"search_queries": deduped[:10]})
 
 
 # ==============================================================================
@@ -282,11 +396,15 @@ def create_research_plan(
     else:
         raise PlannerInvalidInputError("Request must be a ResearchRequest or string.")
 
+    research_question, _ = sanitize_research_question(req_obj.question)
+    if research_question != req_obj.question:
+        req_obj = req_obj.model_copy(update={"question": research_question})
+
     groq_client = client or GroqClientWrapper()
     user_prompt = f"Plan this research inquiry:\n\n{req_obj.question}"
 
     messages = [
-        {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+        {"role": "system", "content": _planner_prompt()},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -325,16 +443,23 @@ def create_research_plan(
 
             # Record success trace if trace collection is active
             if trace is not None:
+                active_model = getattr(groq_client, "active_model_name", None)
+                if not isinstance(active_model, str):
+                    active_model = groq_client.model_name
                 trace.append(
                     ExecutionEvent(
                         run_id=run_id or "run-planner",
                         stage=WorkflowStage.PLANNED,
                         event_type="plan_created",
                         success=True,
-                        message=f"Plan generated via LLM ({groq_client.model_name})",
+                        model=active_model,
+                        message=f"Plan generated via LLM ({active_model})",
                     )
                 )
-            return plan
+            return _strip_unrequested_years(
+                req_obj.question,
+                _augment_entity_queries(req_obj.question, plan),
+            )
 
         except (json.JSONDecodeError, Exception) as err:
             logger.info("Initial planner output validation failed: %s. Attempting repair.", err)
@@ -343,7 +468,7 @@ def create_research_plan(
     # 2. Single Bounded Repair Attempt
     if validation_error_msg and raw_response:
         repair_messages = [
-            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "system", "content": _planner_prompt()},
             {"role": "user", "content": user_prompt},
             {"role": "assistant", "content": raw_response},
             {
@@ -376,7 +501,10 @@ def create_research_plan(
                         message="Plan successfully repaired after 1 retry attempt",
                     )
                 )
-            return repaired_plan
+            return _strip_unrequested_years(
+                req_obj.question,
+                _augment_entity_queries(req_obj.question, repaired_plan),
+            )
 
         except (LLMAuthError, LLMConfigError, LLMRateLimitError, LLMTimeoutError, LLMConnectionError):
             # Do not mask infrastructure failures as validation errors
@@ -403,7 +531,10 @@ def create_research_plan(
                         message="Deterministic fallback plan used after model planning failed",
                     )
                 )
-            return fallback_plan
+            return _strip_unrequested_years(
+                req_obj.question,
+                _augment_entity_queries(req_obj.question, fallback_plan),
+            )
         except Exception as fallback_err:
             logger.error("Fallback planning could not process request: %s", fallback_err)
             raise PlannerValidationError(

@@ -31,6 +31,19 @@ class ExtractionStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class SourceType(str, Enum):
+    """Coarse provenance category used to describe the source mix."""
+
+    OFFICIAL_DOCUMENTATION = "official_documentation"
+    OFFICIAL_COMPANY = "official_company"
+    OFFICIAL_REPO = "official_repo"
+    ACADEMIC = "academic"
+    NEWS = "news"
+    VENDOR_BLOG = "vendor_blog"
+    FORUM = "forum"
+    OTHER = "other"
+
+
 class ResearchAnswerStatus(str, Enum):
     """Outcome status of research answer synthesis."""
 
@@ -62,11 +75,30 @@ class ErrorCategory(str, Enum):
     RATE_LIMIT = "rate_limit"
     AUTH_ERROR = "auth_error"
     CONNECTION_ERROR = "connection_error"
+    HTTP_ERROR = "http_error"
     VALIDATION_ERROR = "validation_error"
     EXTRACTION_ERROR = "extraction_error"
     BUDGET_EXHAUSTED = "budget_exhausted"
     UNSAFE_URL = "unsafe_url"
     UNKNOWN = "unknown"
+
+
+class ReasonCode(str, Enum):
+    """Structured causes that explain degraded status or confidence."""
+
+    ENTITY_NO_EVIDENCE = "ENTITY_NO_EVIDENCE"
+    LOW_COVERAGE = "LOW_COVERAGE"
+    SYNTHESIS_FALLBACK_USED = "SYNTHESIS_FALLBACK_USED"
+    UNGROUNDED_SHORT_ANSWER = "UNGROUNDED_SHORT_ANSWER"
+    UNSUPPORTED_FINDINGS = "UNSUPPORTED_FINDINGS"
+    VENDOR_SOURCES_DOMINATE = "VENDOR_SOURCES_DOMINATE"
+    BENCHMARK_CONFIDENCE_CAP = "BENCHMARK_CONFIDENCE_CAP"
+    DEADLINE_EXHAUSTED = "DEADLINE_EXHAUSTED"
+    EARLY_STOP = "EARLY_STOP"
+    ENTITY_COUNT_SHORT = "ENTITY_COUNT_SHORT"
+    FRESHNESS_WARNING = "FRESHNESS_WARNING"
+    UNSAFE_URL_BLOCKED = "UNSAFE_URL_BLOCKED"
+    PROMPT_INJECTION_HANDLED = "PROMPT_INJECTION_HANDLED"
 
 
 # Permitted tools in the deterministic allowlist
@@ -222,6 +254,7 @@ class SourceDocument(BaseModel):
         description="Heuristic quality score between 0.0 and 1.0.",
     )
     extraction_status: ExtractionStatus = ExtractionStatus.SUCCESS
+    source_type: SourceType = SourceType.OTHER
     rejection_reason: Optional[str] = Field(default=None, max_length=300)
 
     @field_validator("url")
@@ -250,16 +283,19 @@ class ClaimVerificationResult(BaseModel):
 
 
 class AnswerEvaluation(BaseModel):
-    """Deterministic evaluator report for citation and grounding quality."""
+    """Deterministic citation validity, finding coverage, and grounding report."""
 
     citation_count: int = Field(default=0, ge=0)
     valid_citation_count: int = Field(default=0, ge=0)
     citation_validity_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    uncited_finding_count: int = Field(default=0, ge=0)
+    citation_coverage_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     grounded_finding_count: int = Field(default=0, ge=0)
     finding_count: int = Field(default=0, ge=0)
     grounding_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     warnings: list[str] = Field(default_factory=list, max_length=20)
     guardrail_triggered: bool = False
+    short_answer_ungrounded: list[str] = Field(default_factory=list, max_length=20)
 
 
 class Finding(BaseModel):
@@ -307,11 +343,23 @@ class ResearchAnswer(BaseModel):
     assumptions: list[str] = Field(default_factory=list, max_length=15)
     limitations: list[str] = Field(default_factory=list, max_length=15)
     suggested_next_steps: list[str] = Field(default_factory=list, max_length=15)
+    entities: list[str] = Field(
+        default_factory=list,
+        max_length=30,
+        description="Named entities identified in response to a find/list N request.",
+    )
+    source_type_mix: dict[str, int] = Field(
+        default_factory=dict,
+        description="Counts of accepted sources by coarse source type.",
+    )
     status: ResearchAnswerStatus = ResearchAnswerStatus.COMPLETED
+    reason_code: Optional[str] = Field(default=None, max_length=80)
+    status_reasons: list["StatusReason"] = Field(default_factory=list, max_length=20)
+    short_answer_ungrounded: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ExecutionEvent(BaseModel):
-    """Auditable runtime trace event for observability."""
+    """Auditable runtime trace event; timestamp records completion time."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -323,6 +371,7 @@ class ExecutionEvent(BaseModel):
     success: bool = True
     error_category: Optional[ErrorCategory] = None
     message: Optional[str] = Field(default=None, max_length=1000)
+    model: Optional[str] = Field(default=None, max_length=128)
 
 
 class CoverageReport(BaseModel):
@@ -360,3 +409,18 @@ class ResearchContext(BaseModel):
     answer: Optional[ResearchAnswer] = None
     quality_gate_warnings: list[str] = Field(default_factory=list)
     evaluation: Optional[AnswerEvaluation] = None
+    reason_code: Optional[str] = Field(default=None, max_length=80)
+    pipeline_started_at: Optional[datetime] = None
+    pipeline_finished_at: Optional[datetime] = None
+    stage_wall_times_ms: dict[str, float] = Field(default_factory=dict)
+    synthesis_model: Optional[str] = Field(default=None, max_length=128)
+    entity_coverage: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    error_breakdown: dict[str, int] = Field(default_factory=dict)
+    status_reasons: list["StatusReason"] = Field(default_factory=list, max_length=20)
+
+
+class StatusReason(BaseModel):
+    """Machine-readable and human-readable explanation for status/confidence."""
+
+    code: ReasonCode
+    message: str = Field(..., min_length=1, max_length=500)

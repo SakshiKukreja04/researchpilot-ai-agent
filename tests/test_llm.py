@@ -15,9 +15,11 @@ from app.llm import (
     LLMAuthError,
     LLMConfigError,
     LLMConnectionError,
+    LLMModelUnavailableError,
     LLMRateLimitError,
     LLMResponseError,
     LLMTimeoutError,
+    LLMTruncatedOutputError,
 )
 
 try:
@@ -76,7 +78,7 @@ def test_api_key_is_masked_in_repr():
 
 
 def test_custom_model_configuration():
-    custom_model = "llama-3.1-8b-instant"
+    custom_model = "openai/gpt-oss-20b"
     settings = Settings(groq_api_key="gsk_test", groq_model=custom_model)
     wrapper = GroqClientWrapper(settings=settings)
     assert wrapper.model_name == custom_model
@@ -96,7 +98,7 @@ def test_successful_chat_completion():
     mock_client.chat.completions.create.return_value = mock_response
 
     wrapper = GroqClientWrapper(
-        settings=Settings(groq_api_key="gsk_dummy", groq_model="llama-3.3-70b-versatile"),
+        settings=Settings(groq_api_key="gsk_dummy", groq_model="openai/gpt-oss-120b"),
         client=mock_client,
     )
 
@@ -106,10 +108,66 @@ def test_successful_chat_completion():
     # Verify call parameters
     mock_client.chat.completions.create.assert_called_once()
     call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "llama-3.3-70b-versatile"
+    assert call_kwargs["model"] == "openai/gpt-oss-120b"
+    assert call_kwargs["reasoning_effort"] == "low"
     assert call_kwargs["temperature"] == 0.2
     assert len(call_kwargs["messages"]) == 1
     assert call_kwargs["messages"][0]["content"] == "What is the capital of France?"
+
+
+def test_reasoning_effort_is_omitted_for_non_gpt_oss_models():
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock(message=MagicMock(content="ok"))]
+    mock_client.chat.completions.create.return_value = mock_response
+
+    wrapper = GroqClientWrapper(
+        settings=Settings(
+            groq_api_key="gsk_dummy",
+            groq_model="llama-3.2-3b-preview",
+            groq_reasoning_effort="high",
+        ),
+        client=mock_client,
+    )
+    wrapper.complete("Test")
+
+    assert "reasoning_effort" not in mock_client.chat.completions.create.call_args.kwargs
+
+
+def test_length_finish_reason_raises_typed_truncation_error():
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [
+        MagicMock(
+            finish_reason="length",
+            message=MagicMock(content='{"partial": true}'),
+        )
+    ]
+    mock_client.chat.completions.create.return_value = mock_response
+    wrapper = GroqClientWrapper(
+        settings=Settings(groq_api_key="gsk_dummy"),
+        client=mock_client,
+    )
+
+    with pytest.raises(LLMTruncatedOutputError) as exc_info:
+        wrapper.complete("Test")
+    assert "output limit" in str(exc_info.value)
+
+
+def test_model_not_found_is_normalized_to_actionable_config_error():
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = Exception(
+        "model not found: this model has been decommissioned"
+    )
+    wrapper = GroqClientWrapper(
+        settings=Settings(groq_api_key="gsk_dummy"),
+        client=mock_client,
+    )
+
+    with pytest.raises(LLMModelUnavailableError) as exc_info:
+        wrapper.complete("Test")
+    assert "openai/gpt-oss-120b" in str(exc_info.value)
+    assert "https://console.groq.com/docs/models" in str(exc_info.value)
 
 
 def test_empty_or_null_choices_raises_llm_response_error():

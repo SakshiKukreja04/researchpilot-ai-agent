@@ -37,6 +37,7 @@ from app.schemas import (
     SourceDocument,
     WorkflowStage,
 )
+from app.ui_helpers import grouped_warnings, source_mix_chips, status_banner
 
 # Initialize structured logging
 logger = configure_logging(level="INFO", log_file="logs/researchpilot.jsonl", json_format=True)
@@ -135,14 +136,29 @@ def build_trace_table_data(trace: list[ExecutionEvent]) -> list[dict[str, Any]]:
     return rows
 
 
-def calculate_trace_metrics(trace: list[ExecutionEvent]) -> dict[str, Any]:
+def calculate_trace_metrics(
+    trace: list[ExecutionEvent],
+    context: Any | None = None,
+) -> dict[str, Any]:
     """Compute aggregate observability metrics from runtime trace events."""
-    total_duration_ms = sum(e.duration_ms for e in trace if e.duration_ms is not None)
+    if context is not None and context.pipeline_started_at and context.pipeline_finished_at:
+        total_duration_ms = (
+            context.pipeline_finished_at - context.pipeline_started_at
+        ).total_seconds() * 1000.0
+        stage_wall_times_ms = context.stage_wall_times_ms
+    else:
+        # Legacy helper callers may provide synthetic events without pipeline
+        # timing metadata. Actual dashboard runs always pass the context.
+        total_duration_ms = sum(
+            e.duration_ms for e in trace if e.duration_ms is not None
+        )
+        stage_wall_times_ms = {}
     tool_events = [e for e in trace if e.event_type in {"search_query_executed", "page_fetched"}]
     failed_events = [e for e in trace if not e.success]
 
     return {
         "total_duration_s": round(total_duration_ms / 1000.0, 2),
+        "stage_wall_times_ms": stage_wall_times_ms,
         "total_events": len(trace),
         "tool_calls_count": len(tool_events),
         "failures_count": len(failed_events),
@@ -157,13 +173,23 @@ def calculate_trace_metrics(trace: list[ExecutionEvent]) -> dict[str, Any]:
 def _render_sidebar(settings: Any) -> bool:
     """Render sidebar with system configuration and controls."""
     with st.sidebar:
+        st.markdown(
+            "<style>[data-testid='stSidebar'] [data-testid='stMarkdownContainer'] "
+            "{padding-left: 0.35rem;}</style>",
+            unsafe_allow_html=True,
+        )
         st.header("⚙️ Configuration")
         st.markdown(
             f"**Model:** `{settings.groq_model}`\n\n"
-            f"**Search Provider:** `DuckDuckGo (ddgs)`\n\n"
+            f"**Fallback Model:** `{settings.groq_synthesis_fallback_model or 'disabled'}`\n\n"
+            f"**Search Provider:** `DuckDuckGo (ddgs) with Bing fallback`\n\n"
             f"**Query Budget:** `{settings.max_search_queries}`\n\n"
             f"**Page Budget:** `{settings.max_fetch_pages}`\n\n"
-            f"**Deadline:** `{settings.overall_deadline_seconds}s`"
+            f"**Fetch Workers:** `{settings.fetch_max_workers}`\n\n"
+            f"**Search Cap:** `{settings.search_query_timeout_seconds}s`\n\n"
+            f"**Deadline:** `{settings.overall_deadline_seconds}s`\n\n"
+            f"**Early-stop:** `{settings.early_stop_consecutive_failures}` failures / "
+            f"`{settings.early_stop_min_relevance}` relevance"
         )
         st.divider()
 
@@ -179,7 +205,7 @@ def _render_sidebar(settings: Any) -> bool:
             clear_research_session(st.session_state)
             st.rerun()
 
-        st.caption("ResearchPilot v1.0 • Antigravity Phase 6")
+        st.caption("ResearchPilot v1.0")
         return verify_claims
 
 
@@ -195,7 +221,12 @@ def _render_findings(
         return
 
     for idx, f in enumerate(findings):
-        with st.container():
+        unsupported = f.support_status == ClaimSupportStatus.UNSUPPORTED
+        finding_container = st.expander(
+            f"⚪ Unsupported finding #{idx + 1}: {f.claim[:80]}",
+            expanded=False,
+        ) if unsupported else st.container()
+        with finding_container:
             # Support status badge
             badge = ""
             if f.support_status == ClaimSupportStatus.SUPPORTED:
@@ -219,6 +250,10 @@ def _render_findings(
                     else:
                         citation_links.append(f"`{sid}`")
                 st.markdown(f"**Citations:** {' • '.join(citation_links)}")
+                st.caption(" ".join(
+                    f"`{sid}: {next((s.source_type.value + ' / ' + s.domain for s in sources if s.source_id == sid), 'unknown')}`"
+                    for sid in f.source_ids
+                ))
 
                 # Reviewer comparison drawer
                 with st.expander(f"🔎 Reviewer evidence comparison for Finding #{idx + 1}"):
@@ -270,6 +305,7 @@ def _render_sources_registry(sources: list[SourceDocument]) -> None:
             date_str = format_source_display_date(doc.published_date)
             st.markdown(
                 f"- **Domain:** `{doc.domain}`\n"
+                f"- **Source Type:** `{doc.source_type.value}`\n"
                 f"- **Published Date:** {date_str}\n"
                 f"- **Quality Score:** `{doc.quality_score:.2f}`\n"
                 f"- **URL:** [{doc.url}]({doc.url})"
@@ -307,15 +343,35 @@ def _render_coverage_and_rejections(
             st.caption("No candidate sources were rejected.")
 
 
-def _render_trace_and_observability(trace: list[ExecutionEvent]) -> None:
+def _render_trace_and_observability(
+    trace: list[ExecutionEvent],
+    context: ResearchContext | None = None,
+) -> None:
     """Render execution audit trace with durations, retries, and failure categories."""
     with st.expander(f"🔍 Execution Trace & Observability ({len(trace)} Events)", expanded=False):
-        metrics = calculate_trace_metrics(trace)
+        metrics = calculate_trace_metrics(trace, context)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Latency", f"{metrics['total_duration_s']}s")
         c2.metric("Total Events", metrics["total_events"])
         c3.metric("Tool Calls", metrics["tool_calls_count"])
         c4.metric("Errors / Retries", metrics["failures_count"])
+        if context is not None and context.error_breakdown:
+            st.caption("Error breakdown")
+            st.dataframe(
+                [{"Error": key, "Count": value} for key, value in context.error_breakdown.items()],
+                use_container_width=True,
+                hide_index=True,
+            )
+        if metrics["stage_wall_times_ms"]:
+            st.caption("Stage wall time")
+            st.dataframe(
+                [
+                    {"Stage": stage, "Wall time (s)": round(duration / 1000.0, 2)}
+                    for stage, duration in metrics["stage_wall_times_ms"].items()
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
         trace_data = build_trace_table_data(trace)
         st.dataframe(trace_data, use_container_width=True, hide_index=True)
@@ -328,53 +384,64 @@ def _render_trace_and_observability(trace: list[ExecutionEvent]) -> None:
             file_name="researchpilot_trace.json",
             mime="application/json",
         )
+        if context is not None:
+            result_json = json.dumps(context.model_dump(mode="json"), indent=2)
+            st.download_button(
+                label="📥 Download Result JSON",
+                data=result_json,
+                file_name="researchpilot_result.json",
+                mime="application/json",
+            )
 
 
 def _render_results(context: ResearchContext) -> None:
     """Render full research deliverables and inspectable intermediary states."""
     answer = context.answer
 
-    # 1. Status Callout
-    if context.status == ResearchAnswerStatus.COMPLETED:
-        st.success("✅ **Research Completed** — All subquestions supported by verifiable evidence.")
-    elif context.status == ResearchAnswerStatus.PARTIAL:
-        st.warning(
-            "⚠️ **Partial Research Result** — Some subquestions lacked adequate evidence or budget constraints were reached."
-        )
-    elif context.status == ResearchAnswerStatus.INSUFFICIENT_EVIDENCE:
-        st.warning(
-            "⚠️ **Insufficient Evidence** — No credible web evidence survived quality filters. No unsupported claims were fabricated."
-        )
-    else:
-        st.error("❌ **Research Failed** — The workflow encountered an unrecoverable failure.")
-
-    # 2. Confidence Warning Callout
-    if answer and (answer.confidence == ConfidenceLevel.LOW or context.status != ResearchAnswerStatus.COMPLETED):
-        st.warning(
-            f"⚠️ **Low Confidence / Partial Notice:** Confidence is assessed as **{answer.confidence.value.upper()}**. "
-            f"Review the limitations, coverage breakdown, and source registry below before relying on these results."
-        )
+    # 1. Unified status callout
+    level, title, subtitle = status_banner(context)
+    getattr(st, level)(f"**{title}** — {subtitle}")
 
     # 3. Quality Gate Warnings
+    if context.status_reasons:
+        with st.expander("Why this status?", expanded=False):
+            for reason in context.status_reasons:
+                st.markdown(f"- **{reason.code.value}:** {reason.message}")
     if context.quality_gate_warnings:
         with st.expander("⚠️ Quality Gate & Citation Warnings", expanded=True):
-            for w in context.quality_gate_warnings:
-                st.markdown(f"- {w}")
+            for group, warnings in grouped_warnings(context).items():
+                if warnings:
+                    st.markdown(f"**{group}**")
+                    for warning in warnings:
+                        st.markdown(f"- {warning}")
 
     # 4. Metrics summary bar
     if answer:
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Confidence", answer.confidence.value.upper())
         m2.metric("Evidence Coverage", f"{context.coverage.coverage_ratio:.0%}")
         m3.metric("Accepted Sources", len(context.sources))
         m4.metric("Rejected Sources", len(context.rejected_sources))
+        total_latency = calculate_trace_metrics(context.trace, context)["total_duration_s"]
+        m5.metric("Total Latency", f"{total_latency}s")
+        st.caption("Entities: " + (context.entity_coverage and "  ".join(
+            f"{entity} {'✓' if item.get('supported') else '✗'}"
+            for entity, item in context.entity_coverage.items()
+        ) or "No named entities"))
+        st.caption("Source mix: " + " ".join(
+            f"`{item['type']}: {item['count']}`" for item in source_mix_chips(context)
+        ))
 
     st.divider()
 
     # 5. Short Answer
     if answer and answer.short_answer:
         st.subheader("Short Answer")
-        st.markdown(answer.short_answer)
+        for sentence in answer.short_answer.split(". "):
+            marker = " ⚠ unverified" if any(
+                sentence.strip() in item for item in answer.short_answer_ungrounded
+            ) else ""
+            st.markdown(sentence + ("." if not sentence.endswith(".") else "") + marker)
 
     # 6. Key Findings
     if answer:
@@ -413,7 +480,7 @@ def _render_results(context: ResearchContext) -> None:
     _render_research_plan(context.plan)
     _render_sources_registry(context.sources)
     _render_coverage_and_rejections(context)
-    _render_trace_and_observability(context.trace)
+    _render_trace_and_observability(context.trace, context)
 
 
 # ==============================================================================

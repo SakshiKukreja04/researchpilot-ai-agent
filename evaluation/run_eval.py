@@ -27,6 +27,16 @@ def load_cases() -> list[dict[str, Any]]:
     return json.loads((ROOT / "evaluation" / "test_cases.json").read_text(encoding="utf-8"))
 
 
+EDGE_CASES = {
+    "EC1": {
+        "id": "EC1",
+        "question": "   ",
+        "mode": "deterministic",
+        "expected": "Whitespace-only input is rejected before external calls.",
+    }
+}
+
+
 def run_deterministic_case(case: dict[str, Any]):
     """Run the full pipeline with deterministic stand-ins for external services."""
     if not case["question"].strip():
@@ -87,9 +97,12 @@ def run_deterministic_case(case: dict[str, Any]):
     )
 
 
-def run_cases(mode: str) -> list[dict[str, Any]]:
+def run_cases(mode: str, only: set[str] | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for case in load_cases():
+    cases = load_cases() + list(EDGE_CASES.values())
+    for case in cases:
+        if only and case["id"] not in only:
+            continue
         if mode == "live" and case["mode"] != "live":
             continue
         started = datetime.now(timezone.utc)
@@ -134,10 +147,15 @@ def run_cases(mode: str) -> list[dict[str, Any]]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("deterministic", "live", "all"), default="all")
+    parser.add_argument(
+        "--only",
+        help="Comma-separated case IDs, including built-in edge case EC1.",
+    )
     parser.add_argument("--output", default="evaluation/results/latest.json")
     args = parser.parse_args()
 
-    records = run_cases(args.mode)
+    only = {item.strip() for item in args.only.split(",")} if args.only else None
+    records = run_cases(args.mode, only=only)
     output = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": args.mode,

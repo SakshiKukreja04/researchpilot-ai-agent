@@ -27,7 +27,7 @@ import httpx
 
 from app.config import get_settings
 from app.cache import TTLCache
-from app.schemas import ExtractionStatus, SourceDocument
+from app.schemas import ExtractionStatus, SourceDocument, SourceType
 from app.tools.search import TRACKING_PARAMS
 
 try:
@@ -86,8 +86,9 @@ class FetchTimeoutError(FetchError):
 class FetchHTTPError(FetchError):
     """Raised on non-success HTTP status codes or connection errors."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
         super().__init__(message, error_category="HTTP_ERROR")
+        self.status_code = status_code
 
 
 class FetchUnsupportedContentTypeError(FetchError):
@@ -375,7 +376,8 @@ def fetch_and_extract(
                     # Check HTTP status
                     if response.status_code != 200:
                         raise FetchHTTPError(
-                            f"HTTP {response.status_code} received from server for '{current_url}'."
+                            f"HTTP {response.status_code} received from server for '{current_url}'.",
+                            status_code=response.status_code,
                         )
 
                     # Check Content-Type header
@@ -474,7 +476,36 @@ def fetch_and_extract(
         published_date=published_date,
         quality_score=1.0,  # Default baseline before scoring in Phase 4
         extraction_status=ExtractionStatus.SUCCESS,
+        source_type=_infer_source_type(current_url, title),
     )
     if settings.cache_enabled and session_visited_urls is None and client is None:
         _FETCH_CACHE.set(normalized, document)
     return document
+
+
+def _infer_source_type(url: str, title: str) -> SourceType:
+    """Classify a fetched page for source-mix reporting and authority scoring."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    title_lower = title.lower()
+    if host.endswith(".edu") or "arxiv.org" in host or "doi.org" in host:
+        return SourceType.ACADEMIC
+    if host.endswith(".gov") or "docs." in host or "developer." in host or "/docs" in path:
+        return SourceType.OFFICIAL_DOCUMENTATION
+    if any(news in host for news in ("reuters.", "apnews.", "techcrunch.", "venturebeat.", "theverge.")):
+        return SourceType.NEWS
+    if any(forum in host for forum in ("reddit.", "stackoverflow.", "quora.", "dev.to")):
+        return SourceType.FORUM
+    if any(term in title_lower for term in ("official blog", "engineering blog", "company blog")):
+        return SourceType.VENDOR_BLOG
+    known_company_domains = {
+        "darwinbox.com",
+        "keka.com",
+        "greythr.com",
+        "peoplestrong.com",
+        "zoho.com",
+    }
+    if host.removeprefix("www.") in known_company_domains:
+        return SourceType.OFFICIAL_COMPANY
+    return SourceType.OTHER

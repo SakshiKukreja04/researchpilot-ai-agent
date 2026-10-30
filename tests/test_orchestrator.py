@@ -109,7 +109,7 @@ def test_happy_path_orchestration():
     ])
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     context = run_research(
@@ -131,7 +131,7 @@ def test_empty_search_results_stops_with_insufficient_evidence():
     mock_fetch = MagicMock()
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     context = run_research(
@@ -165,7 +165,7 @@ def test_partial_source_fetch_failures_do_not_abort_workflow():
     ])
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     context = run_research(
@@ -180,6 +180,34 @@ def test_partial_source_fetch_failures_do_not_abort_workflow():
     assert any(evt.event_type == "page_fetch_failed" for evt in context.trace)
 
 
+def test_consecutive_fetch_failures_abort_unproductive_retrieval():
+    mock_search = MagicMock(
+        return_value=[
+            SearchResult(title=f"Bad Page {i}", url=f"https://example.com/{i}", snippet="Dead link")
+            for i in range(1, 5)
+        ]
+    )
+    mock_fetch = MagicMock(side_effect=RuntimeError("unavailable"))
+    mock_client = MagicMock(spec=GroqClientWrapper)
+    mock_client.model_name = "openai/gpt-oss-120b"
+    mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
+
+    context = run_research(
+        "Find reliable information about an obscure topic",
+        settings=Settings(
+            max_retries_per_tool=0,
+            max_consecutive_fetch_failures=2,
+            max_research_rounds=1,
+        ),
+        client=mock_client,
+        search_tool_fn=mock_search,
+        fetch_tool_fn=mock_fetch,
+    )
+
+    assert mock_fetch.call_count == 2
+    assert any(evt.event_type == "fetch_failure_abort" for evt in context.trace)
+
+
 def test_unsafe_url_is_blocked_and_never_retried():
     mock_search = MagicMock(return_value=[
         SearchResult(title="SSRF Target", url="http://127.0.0.1/admin", snippet="Malicious link"),
@@ -188,7 +216,7 @@ def test_unsafe_url_is_blocked_and_never_retried():
     mock_fetch = MagicMock(side_effect=FetchUnsafeURLError("Blocked unsafe IP"))
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     context = run_research(
@@ -213,7 +241,7 @@ def test_transient_search_timeout_triggers_bounded_retry():
     mock_fetch = MagicMock(return_value=_mock_doc("src_111", "https://example.com", "Title", "Text " * 20))
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     settings = Settings(max_search_queries=1, max_fetch_pages=1, max_retries_per_tool=1)
@@ -239,7 +267,7 @@ def test_budget_exhaustion_stops_further_tool_calls():
     mock_fetch = MagicMock(return_value=_mock_doc("src_1", "https://example.com", "Title", "Content " * 10))
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     # Budget strictly limits: max 2 search queries, max 2 page fetches
@@ -270,7 +298,7 @@ def test_prompt_injection_in_page_stored_as_data_without_executing():
     ))
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan().model_dump_json()
 
     context = run_research(
@@ -311,7 +339,7 @@ def test_additional_round_triggered_when_coverage_inadequate():
     ])
 
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = plan_with_unsupported.model_dump_json()
 
     settings = Settings(max_search_queries=5, max_fetch_pages=5, max_research_rounds=1)

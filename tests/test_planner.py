@@ -25,8 +25,9 @@ from app.planner import (
     PlannerValidationError,
     create_fallback_plan,
     create_research_plan,
+    extract_search_entities,
 )
-from app.schemas import ExecutionEvent, ResearchPlan, ResearchRequest
+from app.schemas import ExecutionEvent, ResearchPlan, ResearchRequest, SearchResult
 
 
 # ==============================================================================
@@ -77,7 +78,7 @@ def _mock_plan_json(
 
 def test_comparison_question_produces_valid_plan():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan_json()
 
     req = ResearchRequest(
@@ -94,7 +95,7 @@ def test_comparison_question_produces_valid_plan():
 
 def test_company_research_produces_valid_plan():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan_json(
         objective="Find 5 Indian B2B SaaS startups in HR tech",
         subquestions=[
@@ -116,12 +117,48 @@ def test_company_research_produces_valid_plan():
 
     assert isinstance(plan, ResearchPlan)
     assert "Indian B2B SaaS" in plan.objective
-    assert len(plan.search_queries) == 3
+    assert len(plan.search_queries) <= 10
+    assert any("Darwinbox official site" in query for query in plan.search_queries)
+    assert any("Keka official site" in query for query in plan.search_queries)
+
+
+def test_entity_extraction_rejects_generic_phrases_and_requires_two_results():
+    results = [
+        SearchResult(
+            title="We Tested official site",
+            url="https://example.com/one",
+            snippet="We Tested several options.",
+        ),
+        SearchResult(
+            title="Open-Source Vector DB official site",
+            url="https://example.com/two",
+            snippet="Open-Source Vector DB comparison.",
+        ),
+        SearchResult(
+            title="PostgreSQL documentation",
+            url="https://postgresql.org/docs",
+            snippet="PostgreSQL supports extensions for vector search.",
+        ),
+        SearchResult(
+            title="PostgreSQL for RAG",
+            url="https://example.org/postgres",
+            snippet="PostgreSQL is used in RAG systems.",
+        ),
+    ]
+
+    entities = extract_search_entities(
+        results,
+        question="Compare PostgreSQL and SQLite for RAG products.",
+    )
+
+    assert "We Tested" not in entities
+    assert "Open-Source Vector DB" not in entities
+    assert "PostgreSQL" in entities
 
 
 def test_time_sensitive_question_marks_requires_fresh_evidence():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan_json(
         objective="Investigate latest AI model releases this week",
         requires_fresh_evidence=True,
@@ -137,7 +174,7 @@ def test_time_sensitive_question_marks_requires_fresh_evidence():
 
 def test_technical_explanation_does_not_require_freshness_by_default():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan_json(
         objective="Explain the Raft consensus algorithm",
         requires_fresh_evidence=False,
@@ -153,7 +190,7 @@ def test_technical_explanation_does_not_require_freshness_by_default():
 
 def test_selected_tools_are_strict_members_of_allowlist():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.return_value = _mock_plan_json(
         tools=["web_search", "fetch_and_extract"]
     )
@@ -169,7 +206,7 @@ def test_selected_tools_are_strict_members_of_allowlist():
 
 def test_malformed_json_triggers_successful_repair():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     # First attempt returns broken JSON; second attempt returns valid plan JSON
     mock_client.chat_completion.side_effect = [
         "NOT JSON { broken",
@@ -185,7 +222,7 @@ def test_malformed_json_triggers_successful_repair():
 
 def test_disallowed_tool_triggers_successful_repair():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     # First attempt returns an unauthorized tool; second returns allowlisted tools
     invalid_plan = _mock_plan_json(tools=["web_search", "execute_python_code"])
     valid_plan = _mock_plan_json(tools=["web_search", "fetch_and_extract"])
@@ -200,7 +237,7 @@ def test_disallowed_tool_triggers_successful_repair():
 
 def test_too_many_subquestions_triggers_repair():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     # 12 subquestions exceeds the max limit of 8
     excessive_subquestions = [f"Subquestion {i}" for i in range(12)]
     invalid_plan = _mock_plan_json(subquestions=excessive_subquestions)
@@ -214,7 +251,7 @@ def test_too_many_subquestions_triggers_repair():
 
 def test_failed_repair_engages_fallback_when_enabled():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     # Both initial and repair attempt return broken JSON
     mock_client.chat_completion.side_effect = [
         "Broken 1",
@@ -238,7 +275,7 @@ def test_failed_repair_engages_fallback_when_enabled():
 
 def test_failed_repair_raises_validation_error_when_fallback_disabled():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.side_effect = [
         "Broken 1",
         "Broken 2",
@@ -254,7 +291,7 @@ def test_failed_repair_raises_validation_error_when_fallback_disabled():
 
 def test_repair_does_not_trigger_infinite_retry_loops():
     mock_client = MagicMock(spec=GroqClientWrapper)
-    mock_client.model_name = "llama-3.3-70b-versatile"
+    mock_client.model_name = "openai/gpt-oss-120b"
     mock_client.chat_completion.side_effect = [
         "Invalid JSON 1",
         "Invalid JSON 2",

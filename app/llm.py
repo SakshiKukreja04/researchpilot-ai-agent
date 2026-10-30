@@ -69,6 +69,14 @@ class LLMResponseError(LLMError):
     """Raised when the LLM returns an invalid, malformed, or empty response."""
 
 
+class LLMModelUnavailableError(LLMConfigError):
+    """Raised when the configured model is retired, unavailable, or misspelled."""
+
+
+class LLMTruncatedOutputError(LLMResponseError):
+    """Raised when the provider stops output because the token limit was reached."""
+
+
 # ==============================================================================
 # Groq Client Wrapper
 # ==============================================================================
@@ -84,11 +92,17 @@ class GroqClientWrapper:
     ) -> None:
         self._settings = settings or get_settings()
         self._client = client
+        self._active_model_name = self._settings.groq_model
 
     @property
     def model_name(self) -> str:
         """Configured model name."""
         return self._settings.groq_model
+
+    @property
+    def active_model_name(self) -> str:
+        """Return the model used by the most recent request."""
+        return self._active_model_name
 
     def _get_client(self) -> Any:
         """Lazily initialize and return the Groq SDK client."""
@@ -111,6 +125,28 @@ class GroqClientWrapper:
         )
         return self._client
 
+    @staticmethod
+    def _is_model_unavailable_error(error: Exception) -> bool:
+        """Recognize provider not-found/decommissioned responses without exposing payloads."""
+        message = str(error).lower()
+        status_code = getattr(error, "status_code", None)
+        response = getattr(error, "response", None)
+        response_status = getattr(response, "status_code", None)
+        return (
+            status_code == 404
+            or response_status == 404
+            or any(
+                marker in message
+                for marker in (
+                    "model not found",
+                    "model_not_found",
+                    "decommissioned",
+                    "model does not exist",
+                    "unknown model",
+                )
+            )
+        )
+
     def chat_completion(
         self,
         messages: list[dict[str, str]],
@@ -118,6 +154,7 @@ class GroqClientWrapper:
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         response_format: Optional[dict[str, str]] = None,
+        model_override: Optional[str] = None,
     ) -> str:
         """Execute a chat completion request with safe error translation.
 
@@ -139,11 +176,19 @@ class GroqClientWrapper:
         token_limit = max_tokens or self._settings.groq_max_output_tokens
 
         kwargs: dict[str, Any] = {
-            "model": self.model_name,
+            "model": model_override or self.model_name,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": token_limit,
         }
+        selected_model = model_override or self.model_name
+        self._active_model_name = selected_model
+        logger.info("Groq model active: %s", selected_model)
+        if (
+            self._settings.groq_reasoning_effort
+            and selected_model.startswith("openai/gpt-oss-")
+        ):
+            kwargs["reasoning_effort"] = self._settings.groq_reasoning_effort
         if response_format is not None:
             kwargs["response_format"] = response_format
         if timeout is not None:
@@ -170,9 +215,20 @@ class GroqClientWrapper:
                 "Could not connect to Groq API. Please check network connectivity."
             ) from err
         except GroqError as err:
+            if self._is_model_unavailable_error(err):
+                logger.error("Configured Groq model is unavailable: %s", selected_model)
+                raise LLMModelUnavailableError(
+                    f"Groq model '{selected_model}' is unavailable or retired. "
+                    "Check the current model catalog at https://console.groq.com/docs/models."
+                ) from err
             logger.error("Groq generic API error.")
             raise LLMResponseError(f"Groq API returned an error: {type(err).__name__}") from err
         except Exception as err:
+            if self._is_model_unavailable_error(err):
+                raise LLMModelUnavailableError(
+                    f"Groq model '{selected_model}' is unavailable or retired. "
+                    "Check the current model catalog at https://console.groq.com/docs/models."
+                ) from err
             logger.error("Unexpected error during Groq API call: %s", type(err).__name__)
             raise LLMResponseError(
                 f"Unexpected error communicating with LLM: {type(err).__name__}"
@@ -182,6 +238,10 @@ class GroqClientWrapper:
             raise LLMResponseError("Groq returned an empty response with no choices.")
 
         choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            raise LLMTruncatedOutputError(
+                f"Groq model '{selected_model}' stopped at the {token_limit}-token output limit."
+            )
         content = getattr(choice.message, "content", None)
         if content is None:
             raise LLMResponseError("Groq returned a null message content.")

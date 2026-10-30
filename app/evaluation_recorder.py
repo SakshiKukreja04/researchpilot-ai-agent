@@ -50,6 +50,7 @@ def record_streamlit_run(
         "started_at": started_at.isoformat(),
         "finished_at": finished.isoformat(),
         "duration_ms": round((finished - started_at).total_seconds() * 1000, 2),
+        "stage_wall_times_ms": context.stage_wall_times_ms,
         "status": context.status.value,
         "run_id": context.run_id,
         "expected": "Review final status, evidence coverage, citations, warnings, and trace.",
@@ -58,6 +59,17 @@ def record_streamlit_run(
             source.model_dump(mode="json") for source in context.rejected_sources
         ],
         "coverage": context.coverage.model_dump(mode="json"),
+        "entity_coverage": context.entity_coverage,
+        "status_reasons": [reason.model_dump(mode="json") for reason in context.status_reasons],
+        "error_breakdown": context.error_breakdown,
+        "source_type_mix": context.answer.source_type_mix if context.answer else {},
+        "run_metadata": {
+            "pipeline_started_at": context.pipeline_started_at.isoformat()
+            if context.pipeline_started_at else None,
+            "pipeline_finished_at": context.pipeline_finished_at.isoformat()
+            if context.pipeline_finished_at else None,
+            "synthesis_model": context.synthesis_model,
+        },
         "answer": context.answer.model_dump(mode="json") if context.answer else None,
         "evaluation": context.evaluation.model_dump(mode="json")
         if context.evaluation

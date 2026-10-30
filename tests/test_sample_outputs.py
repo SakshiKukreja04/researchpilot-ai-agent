@@ -91,7 +91,8 @@ def test_sample_output_one_successful_grounded_comparison():
         fetch_tool_fn=fetch,
     )
 
-    assert context.status == ResearchAnswerStatus.COMPLETED
+    # One accepted source and 0.50 coverage are explicitly evidence-degraded.
+    assert context.status == ResearchAnswerStatus.PARTIAL
     assert context.answer is not None
     assert context.answer.confidence == ConfidenceLevel.MEDIUM
     assert context.answer.key_findings[0].source_ids == ["src_abcdef12"]

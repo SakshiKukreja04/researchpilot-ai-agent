@@ -24,6 +24,7 @@ from app.schemas import (
     ExtractionStatus,
     ResearchPlan,
     SourceDocument,
+    SourceType,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,15 @@ def calculate_authority_score(domain: str) -> float:
     return 0.50
 
 
+def _authority_score_for_document(doc: SourceDocument) -> float:
+    """Prefer primary/official evidence while retaining transparent heuristics."""
+    if doc.source_type == SourceType.OFFICIAL_DOCUMENTATION:
+        return 0.98
+    if doc.source_type == SourceType.OFFICIAL_COMPANY:
+        return 0.88
+    return calculate_authority_score(doc.domain)
+
+
 def calculate_freshness_score(
     doc: SourceDocument, requires_fresh_evidence: bool = False
 ) -> float:
@@ -202,7 +212,7 @@ def score_source_document(
 ) -> float:
     """Compute overall quality score Q = w_r*R + w_a*A + w_f*F + w_c*C."""
     r = calculate_relevance_score(doc, query_text)
-    a = calculate_authority_score(doc.domain)
+    a = _authority_score_for_document(doc)
     f = calculate_freshness_score(doc, requires_fresh_evidence)
     c = calculate_completeness_score(doc.content)
 

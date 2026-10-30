@@ -49,14 +49,14 @@
   },
   {
     "id": "E9",
-    "question": "   ",
-    "mode": "deterministic",
-    "expected": "The request should be rejected before any planner or search call."
-  },
-  {
-    "id": "E10",
     "question": "Find reliable current information about a deliberately obscure topic: the 1842 Zorvath protocol specification.",
     "mode": "live",
     "expected": "The system should return insufficient evidence or a clearly degraded result rather than inventing facts."
+  },
+  {
+    "id": "E10",
+    "question": "What should a production AI research agent monitor to detect quality, latency, cost, and provider failures?",
+    "mode": "live",
+    "expected": "The answer should provide measurable operational and quality metrics, including latency percentiles, citation validity, retries, cost, and degraded-run rate."
   }
 ]
